@@ -640,7 +640,7 @@ def analyze_video(
         step=5,
         step_name="教练点评",
         progress=88,
-        message="正在写练习建议…",
+        message="正在写练习建议，大约还要 2 分钟…",
     )
     report = enrich_with_cursor(report, kf_dir, progress=progress)
 

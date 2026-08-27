@@ -235,7 +235,7 @@ def enrich_with_cursor(report: dict, kf_dir: Path, progress: ProgressCb | None =
                 "step": 5,
                 "step_name": "教练点评",
                 "progress": 90,
-                "message": "正在写练习建议…",
+                "message": "正在写练习建议，大约还要 2 分钟…",
             }
         )
 
@@ -263,7 +263,7 @@ def enrich_with_cursor(report: dict, kf_dir: Path, progress: ProgressCb | None =
                     "step": 5,
                     "step_name": "教练点评",
                     "progress": min(95, 90 + int(elapsed / 8)),
-                    "message": "正在撰写练习建议…",
+                    "message": "正在写练习建议，大约还要 2 分钟…",
                 }
             )
 

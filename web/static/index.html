@@ -121,7 +121,7 @@
     }
     .step b { display: block; color: var(--text); font-size: 13px; margin-bottom: 4px; }
     .step.on { border-color: var(--ball); color: #cfe39a; box-shadow: 0 0 18px rgba(212,225,87,.15); }
-    .step.done { border-color: #2f6b4e; }
+    .step .eta { display: block; margin-top: 6px; font-size: 11px; opacity: .85; }
     .progress {
       height: 8px; background: #223028; border-radius: 99px; overflow: hidden; margin: 8px 0 18px;
     }
@@ -270,6 +270,7 @@
           <button class="btn" id="pick" type="button">选择文件</button>
           <button class="btn primary" id="sample" type="button">分析 1 分钟样例</button>
         </div>
+        <p class="hint" id="busy" hidden></p>
         <input id="file" type="file" accept="video/mp4,video/quicktime,video/webm" hidden />
         <p class="hint">支持 mp4 / mov / webm。样例是侧面训练录像，会分析前 60 秒；分析过一次后再次点击会直接打开报告。</p>
         <div class="pillars">
@@ -304,12 +305,13 @@
 
   <script>
     const STEPS = [
-      ["读取视频", "打开你的录像"],
-      ["识别动作", "看清挥拍动作"],
-      ["找出挥拍", "标出每一次击球"],
-      ["整理数据", "整理评分依据"],
-      ["教练点评", "生成练习建议"],
+      ["读取视频", "打开你的录像", "约 15 秒"],
+      ["识别动作", "看清挥拍动作", "约 3–4 分钟"],
+      ["找出挥拍", "标出每一次击球", "约 30 秒"],
+      ["整理数据", "整理评分依据", "约 1 分钟"],
+      ["教练点评", "生成练习建议", "约 2 分钟，最慢"],
     ];
+    const JOB_KEY = "tennis-ai-active-job";
     const AXES = [
       ["重心", 25],
       ["击球点", 20],
@@ -320,17 +322,25 @@
     const upload = $("upload"), analyzing = $("analyzing"), reportEl = $("report");
     const drop = $("drop"), file = $("file");
 
-    function paintSteps(step) {
+    function paintSteps(step, etaSteps) {
       $("steps").innerHTML = STEPS.map((s, i) => {
         const n = i + 1;
         const cls = n < step ? "done" : n === step ? "on" : "";
-        return `<div class="step ${cls}"><b>${n}. ${s[0]}</b>${s[1]}</div>`;
+        const eta = (etaSteps && etaSteps[i] && etaSteps[i].label) || s[2];
+        return `<div class="step ${cls}"><b>${n}. ${s[0]}</b>${s[1]}<span class="eta">${esc(eta)}</span></div>`;
       }).join("");
     }
     paintSteps(0);
 
+    function saveJob(id) {
+      try { localStorage.setItem(JOB_KEY, id); } catch (e) {}
+    }
+    function clearJob() {
+      try { localStorage.removeItem(JOB_KEY); } catch (e) {}
+    }
+
     $("pick").onclick = () => file.click();
-    $("again").onclick = () => location.reload();
+    $("again").onclick = () => { clearJob(); location.reload(); };
     drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
     drop.ondragleave = () => drop.classList.remove("over");
     drop.ondrop = (e) => {
@@ -345,6 +355,8 @@
       fd.append("stroke", $("stroke").value);
       fd.append("sample", sample ? "1" : "0");
       if (f) fd.append("video", f);
+      const busy = $("busy");
+      if (busy) { busy.hidden = true; busy.textContent = ""; }
       if (!sample) {
         upload.classList.add("hidden");
         analyzing.classList.remove("hidden");
@@ -353,15 +365,25 @@
       }
       const res = await fetch("api/analyze", { method: "POST", body: fd });
       if (!res.ok) {
-        const t = await res.text();
-        upload.classList.add("hidden");
-        analyzing.classList.remove("hidden");
-        $("msg").textContent = "提交失败：" + t;
-        $("again").hidden = false;
+        let msg = "提交失败，请稍后再试";
+        try {
+          const body = await res.json();
+          msg = body.detail || msg;
+        } catch (e) {}
+        upload.classList.remove("hidden");
+        analyzing.classList.add("hidden");
+        $("again").hidden = true;
+        if (busy) {
+          busy.hidden = false;
+          busy.textContent = msg;
+        } else {
+          $("msg").textContent = msg;
+        }
         return;
       }
       const { job_id, cached } = await res.json();
       if (cached) {
+        clearJob();
         upload.classList.add("hidden");
         analyzing.classList.add("hidden");
         const r = await fetch("api/jobs/" + job_id + "/report");
@@ -369,6 +391,7 @@
         showReport(data);
         return;
       }
+      saveJob(job_id);
       upload.classList.add("hidden");
       analyzing.classList.remove("hidden");
       paintSteps(1);
@@ -377,14 +400,22 @@
     }
 
     async function poll(id) {
+      saveJob(id);
       const res = await fetch("api/jobs/" + id);
+      if (!res.ok) {
+        clearJob();
+        $("msg").textContent = "任务不存在，请重新分析";
+        $("again").hidden = false;
+        return;
+      }
       const job = await res.json();
       $("bar").style.width = (job.progress || 0) + "%";
-      paintSteps(job.step || 1);
+      paintSteps(job.step || 1, job.eta_steps);
       $("msg").textContent = job.message || "";
       $("detail").innerHTML = `
         ${esc(job.source_name || "")}<br/>
-        ${esc(job.step_name || "分析中")} · ${job.progress || 0}%`;
+        ${esc(job.step_name || "分析中")} · ${job.progress || 0}%<br/>
+        <span>${esc(job.eta_hint || "")}</span>`;
       if (job.preview_rev) {
         const img = $("preview");
         const next = "api/jobs/" + id + "/preview?r=" + job.preview_rev;
@@ -395,12 +426,14 @@
         }
       }
       if (job.status === "done") {
+        clearJob();
         const r = await fetch("api/jobs/" + id + "/report");
         const data = await r.json();
         showReport(data);
         return;
       }
-      if (job.status === "error") {
+      if (job.status === "error" || job.status === "cancelled") {
+        clearJob();
         $("msg").textContent = "分析失败：" + (job.message || job.error || "请稍后重试");
         $("again").hidden = false;
         return;
@@ -585,6 +618,30 @@
       };
       paint();
     }
+
+    (async function resumeJob() {
+      let id = "";
+      try { id = localStorage.getItem(JOB_KEY) || ""; } catch (e) {}
+      if (!id) return;
+      const res = await fetch("api/jobs/" + id);
+      if (!res.ok) { clearJob(); return; }
+      const job = await res.json();
+      if (job.status === "done") {
+        const r = await fetch("api/jobs/" + id + "/report");
+        if (!r.ok) { clearJob(); return; }
+        upload.classList.add("hidden");
+        showReport(await r.json());
+        clearJob();
+        return;
+      }
+      if (job.status === "error" || job.status === "cancelled") {
+        clearJob();
+        return;
+      }
+      upload.classList.add("hidden");
+      analyzing.classList.remove("hidden");
+      poll(id);
+    })();
   </script>
 </body>
 </html>

@@ -38,6 +38,8 @@ SAMPLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 _jobs: dict[str, dict] = {}
 _lock = threading.Lock()
 _queue: queue.Queue[str] = queue.Queue()
+_worker_started = False
+_TERMINAL = {"done", "error", "cancelled"}
 
 
 def _sample_path() -> Path | None:
@@ -93,21 +95,140 @@ def _install_sample_cache(job_id: str, cache: Path) -> dict:
     }
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _public_job(job: dict) -> dict:
+    out = {k: v for k, v in job.items() if k != "video_path"}
+    out.update(_eta_fields(job))
+    return out
+
+
+def _eta_fields(job: dict) -> dict:
+    duration = float(job.get("max_seconds") or 0)
+    if duration <= 0:
+        duration = 90.0
+    pose_s = int(max(90, duration * 4))
+    steps = [
+        {"step": 1, "name": "读取视频", "seconds": 15, "label": "约 15 秒"},
+        {
+            "step": 2,
+            "name": "识别动作",
+            "seconds": pose_s,
+            "label": f"约 {max(1, round(pose_s / 60))} 分钟",
+        },
+        {"step": 3, "name": "找出挥拍", "seconds": 30, "label": "约 30 秒"},
+        {"step": 4, "name": "整理数据", "seconds": 50, "label": "约 1 分钟"},
+        {
+            "step": 5,
+            "name": "教练点评",
+            "seconds": 150,
+            "label": "约 2 分钟，这一步最慢",
+        },
+    ]
+    cur = int(job.get("step") or 0)
+    if job.get("status") in _TERMINAL:
+        remain = 0
+        hint = "已完成" if job.get("status") == "done" else ""
+    else:
+        remain = sum(s["seconds"] for s in steps if s["step"] >= max(cur, 1))
+        mins = max(1, round(remain / 60))
+        if cur >= 5:
+            hint = f"正在生成报告，大约还要 2 分钟。关掉页面也没关系，回来还能接着看。"
+        else:
+            hint = f"全部大约还要 {mins} 分钟。关掉页面也不会中断，回来可继续查看进度。"
+    return {"eta_steps": steps, "eta_remaining_s": remain, "eta_hint": hint}
+
+
 def _write_status(job_id: str) -> None:
     job = _jobs[job_id]
     path = JOBS_DIR / job_id / "status.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {k: v for k, v in job.items() if k != "video_path"}
-    path.write_text(json.dumps(payload, ensure_ascii=False, default=json_default), encoding="utf-8")
+    path.write_text(json.dumps(job, ensure_ascii=False, default=json_default), encoding="utf-8")
 
 
 def _set(job_id: str, **kwargs) -> None:
     with _lock:
-        _jobs[job_id].update(kwargs)
-        _jobs[job_id]["updated_at"] = datetime.now(timezone.utc).astimezone().isoformat(
-            timespec="seconds"
-        )
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        incoming = kwargs.get("status")
+        if job.get("status") in _TERMINAL and incoming not in _TERMINAL:
+            return
+        job.update(kwargs)
+        job["updated_at"] = _now()
         _write_status(job_id)
+
+
+def _find_source_video(job_dir: Path) -> Path | None:
+    for p in sorted(job_dir.glob("source.*")):
+        if p.is_file() and p.stat().st_size > 1000:
+            return p
+    return None
+
+
+def _load_status_file(job_dir: Path) -> dict | None:
+    path = job_dir / "status.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _busy_job() -> dict | None:
+    with _lock:
+        for job in _jobs.values():
+            if job.get("status") in ("queued", "running"):
+                return job
+    return None
+
+
+def _recover_jobs() -> None:
+    """Reload jobs from disk. Finish ones that already have a report; drop the rest."""
+    if not JOBS_DIR.is_dir():
+        return
+    sample = _sample_path()
+    for job_dir in sorted(JOBS_DIR.iterdir()):
+        if not job_dir.is_dir():
+            continue
+        job_id = job_dir.name
+        job = _load_status_file(job_dir) or {"id": job_id}
+        job["id"] = job_id
+        report = job_dir / "report.json"
+        video = job.get("video_path")
+        if not video:
+            if job.get("is_sample") and sample is not None:
+                video = str(sample)
+            else:
+                src = _find_source_video(job_dir)
+                video = str(src) if src else ""
+        job["video_path"] = video
+        status = job.get("status")
+        if report.is_file() and status != "error":
+            try:
+                data = json.loads(report.read_text(encoding="utf-8"))
+                overall = data.get("overall") or {}
+                job["status"] = "done"
+                job["step"] = 5
+                job["step_name"] = "教练点评"
+                job["progress"] = 100
+                job["message"] = "分析完成"
+                job["score"] = overall.get("score")
+                job["n_swings"] = overall.get("n_swings")
+            except Exception:
+                pass
+        elif status in ("queued", "running"):
+            job["status"] = "cancelled"
+            job["message"] = "分析已取消，请稍后再试"
+        with _lock:
+            _jobs[job_id] = job
+            _write_status(job_id)
+        if job.get("is_sample") and job.get("status") == "done" and sample is not None:
+            _save_sample_cache(job_id, sample, str(job.get("stroke_mode") or "auto"))
 
 
 def _run_job(job_id: str) -> None:
@@ -117,6 +238,9 @@ def _run_job(job_id: str) -> None:
         _set(job_id, status="running", step=1, step_name="读取视频", progress=1, message="开始分析你的录像…")
 
         def progress(payload: dict) -> None:
+            with _lock:
+                if _jobs.get(job_id, {}).get("status") in _TERMINAL:
+                    return
             patch = {k: v for k, v in payload.items() if k != "preview"}
             if payload.get("preview"):
                 patch["preview_rev"] = datetime.now().timestamp()
@@ -166,9 +290,14 @@ def _worker() -> None:
 
 
 def _start_worker() -> None:
+    global _worker_started
+    if _worker_started:
+        return
+    _worker_started = True
     t = threading.Thread(target=_worker, name="analyze-worker", daemon=True)
     t.start()
     threading.Thread(target=warm_agent, name="cursor-warm", daemon=True).start()
+    _recover_jobs()
 
 
 app = FastAPI(title="网球挥拍测评 2.0")
@@ -185,7 +314,7 @@ def health():
         gpu = bool(torch.cuda.is_available())
     except Exception:
         gpu = False
-    return {"ok": True, "sample": bool(sample), "gpu": gpu, "version": "2.0"}
+    return {"ok": True, "sample": bool(sample), "gpu": gpu, "version": "2.0", "busy": bool(_busy_job())}
 
 
 @app.get("/api/sample")
@@ -211,22 +340,16 @@ async def analyze(
     if stroke not in ("auto", "forehand", "backhand"):
         stroke = "auto"
 
-    job_id = uuid.uuid4().hex[:12]
-    out_dir = JOBS_DIR / job_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     use_sample = sample in ("1", "true", "yes")
+    src = _sample_path() if use_sample else None
     if use_sample:
-        src = _sample_path()
         if src is None:
             raise HTTPException(400, "没有可用的样例视频")
-        video_path = src
-        source_name = src.name
-        max_seconds = 60
         cache = _load_sample_cache(src, stroke)
         if cache is not None:
+            job_id = uuid.uuid4().hex[:12]
             meta = _install_sample_cache(job_id, cache)
-            now = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+            now = _now()
             with _lock:
                 _jobs[job_id] = {
                     "id": job_id,
@@ -235,10 +358,10 @@ async def analyze(
                     "step_name": "教练点评",
                     "progress": 100,
                     "message": "分析完成",
-                    "max_seconds": max_seconds,
+                    "max_seconds": 60,
                     "stroke_mode": stroke,
                     "title": title,
-                    "source_name": meta.get("source_name") or source_name,
+                    "source_name": meta.get("source_name") or src.name,
                     "score": meta.get("score"),
                     "n_swings": meta.get("n_swings"),
                     "cached": True,
@@ -248,6 +371,18 @@ async def analyze(
                 }
                 _write_status(job_id)
             return {"job_id": job_id, "cached": True}
+
+    if _busy_job():
+        raise HTTPException(409, "正在分析其他录像，请稍后再试")
+
+    job_id = uuid.uuid4().hex[:12]
+    out_dir = JOBS_DIR / job_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if use_sample:
+        video_path = src
+        source_name = src.name
+        max_seconds = 60
     else:
         if video is None or not video.filename:
             raise HTTPException(400, "请上传视频，或选择使用样例")
@@ -265,37 +400,43 @@ async def analyze(
         max_seconds = 0
 
     with _lock:
+        for job in _jobs.values():
+            if job.get("status") in ("queued", "running"):
+                raise HTTPException(409, "正在分析其他录像，请稍后再试")
         _jobs[job_id] = {
             "id": job_id,
-            "status": "queued",
+            "status": "running",
             "step": 0,
-            "step_name": "排队中",
+            "step_name": "准备中",
             "progress": 0,
-            "message": "排队中，马上开始…",
+            "message": "开始分析…",
             "max_seconds": max_seconds,
             "stroke_mode": stroke,
             "title": title,
             "source_name": source_name,
             "video_path": str(video_path),
             "is_sample": use_sample,
-            "created_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+            "created_at": _now(),
         }
         _write_status(job_id)
 
     _queue.put(job_id)
-    return {"job_id": job_id}
+    return {"job_id": job_id, "cached": False}
 
 
 @app.get("/api/jobs/{job_id}")
 def job_status(job_id: str):
     with _lock:
         job = _jobs.get(job_id)
-    if job is None:
-        status_file = JOBS_DIR / job_id / "status.json"
-        if status_file.exists():
-            return json.loads(status_file.read_text(encoding="utf-8"))
-        raise HTTPException(404, "任务不存在")
-    return {k: v for k, v in job.items() if k != "video_path"}
+        if job is not None:
+            return _public_job(job)
+    status_file = JOBS_DIR / job_id / "status.json"
+    if status_file.exists():
+        data = json.loads(status_file.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return _public_job(data)
+        return data
+    raise HTTPException(404, "任务不存在")
 
 
 @app.get("/api/jobs/{job_id}/preview")
