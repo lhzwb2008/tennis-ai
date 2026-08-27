@@ -1,4 +1,4 @@
-"""Upload a tennis video, watch the pipeline, get a coaching report."""
+"""Upload a tennis video and return a coaching report."""
 
 from __future__ import annotations
 
@@ -18,13 +18,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from pipeline.oss import refresh_report_urls
 from pipeline.session import analyze_video, get_estimator, json_default
 
 JOBS_DIR = ROOT / "outputs" / "jobs"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 SAMPLE_CANDIDATES = [
     ROOT / "samples" / "demo.mp4",
-    ROOT / "c487ed1118b3c668be6fe62ab0cbe3f9.mp4",
 ]
 
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
@@ -62,7 +62,7 @@ def _run_job(job_id: str) -> None:
     job = _jobs[job_id]
     out_dir = JOBS_DIR / job_id
     try:
-        _set(job_id, status="running", step=1, step_name="读取视频", progress=1, message="排队完成，开始分析")
+        _set(job_id, status="running", step=1, step_name="读取视频", progress=1, message="开始分析你的录像…")
 
         def progress(payload: dict) -> None:
             patch = {k: v for k, v in payload.items() if k != "preview"}
@@ -76,24 +76,24 @@ def _run_job(job_id: str) -> None:
             max_seconds=float(job["max_seconds"]),
             stroke_mode=job["stroke_mode"],
             title=job.get("title") or "网球挥拍测评报告",
-            media_url_base=f"jobs/{job_id}",
             progress=progress,
         )
         _set(
             job_id,
             status="done",
             step=5,
-            step_name="生成报告",
+            step_name="教练点评",
             progress=100,
             message="分析完成",
             score=report["overall"]["score"],
             n_swings=report["overall"]["n_swings"],
         )
     except Exception as exc:
+        user_msg = str(exc) if isinstance(exc, RuntimeError) else "分析失败，请稍后重试"
         _set(
             job_id,
             status="error",
-            message=str(exc),
+            message=user_msg,
             error="".join(traceback.format_exception_only(type(exc), exc)).strip(),
         )
 
@@ -113,7 +113,7 @@ def _start_worker() -> None:
     t.start()
 
 
-app = FastAPI(title="Tennis Motion Lab")
+app = FastAPI(title="网球挥拍测评")
 _start_worker()
 
 
@@ -130,7 +130,7 @@ def sample_info():
         raise HTTPException(404, "服务器上还没有样例视频")
     return {
         "name": path.name,
-        "label": "背面原视频样例（约前 90 秒）",
+        "label": "1 分钟背面训练样例",
         "exists": True,
     }
 
@@ -139,11 +139,10 @@ def sample_info():
 async def analyze(
     video: UploadFile | None = File(default=None),
     sample: str = Form(default="0"),
-    max_seconds: float = Form(default=90),
+    max_seconds: float = Form(default=0),
     stroke: str = Form(default="auto"),
     title: str = Form(default="网球挥拍测评报告"),
 ):
-    max_seconds = float(min(max(max_seconds, 15), 180))
     if stroke not in ("auto", "forehand", "backhand"):
         stroke = "auto"
 
@@ -158,6 +157,7 @@ async def analyze(
             raise HTTPException(400, "没有可用的样例视频")
         video_path = src
         source_name = src.name
+        max_seconds = 60
     else:
         if video is None or not video.filename:
             raise HTTPException(400, "请上传视频，或选择使用样例")
@@ -172,6 +172,7 @@ async def analyze(
             raise HTTPException(400, "视频超过 400MB")
         video_path.write_bytes(data)
         source_name = Path(video.filename).name
+        max_seconds = 0
 
     with _lock:
         _jobs[job_id] = {
@@ -180,13 +181,12 @@ async def analyze(
             "step": 0,
             "step_name": "排队中",
             "progress": 0,
-            "message": "等待分析线程…",
+            "message": "排队中，马上开始…",
             "max_seconds": max_seconds,
             "stroke_mode": stroke,
             "title": title,
             "source_name": source_name,
             "video_path": str(video_path),
-            "preview_url": f"jobs/{job_id}/preview.jpg",
             "created_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         }
         _write_status(job_id)
@@ -207,12 +207,26 @@ def job_status(job_id: str):
     return {k: v for k, v in job.items() if k != "video_path"}
 
 
+@app.get("/api/jobs/{job_id}/preview")
+def job_preview(job_id: str):
+    root = (JOBS_DIR / job_id).resolve()
+    target = (root / "preview.jpg").resolve()
+    if target.parent != root or not target.is_file():
+        raise HTTPException(404, "预览尚未生成")
+    return FileResponse(
+        target,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/api/jobs/{job_id}/report")
 def job_report(job_id: str):
     path = JOBS_DIR / job_id / "report.json"
     if not path.exists():
         raise HTTPException(404, "报告尚未生成")
-    return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return JSONResponse(refresh_report_urls(data))
 
 
 @app.get("/jobs/{job_id}/{path:path}")

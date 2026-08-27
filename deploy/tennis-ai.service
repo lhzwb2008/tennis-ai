@@ -1,11 +1,12 @@
 [Unit]
-Description=Tennis Motion Lab
+Description=网球挥拍测评
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/tennis-ai
-ExecStart=/opt/tennis-ai/.venv/bin/uvicorn web.app:app --host 127.0.0.1 --port 8766
+# 只绑本机，避开 80/8000-9000 等已被占用的端口
+ExecStart=/opt/tennis-ai/.venv/bin/uvicorn web.app:app --host 127.0.0.1 --port 27116
 Restart=always
 RestartSec=4
 Environment=PYTHONUNBUFFERED=1

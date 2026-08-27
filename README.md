@@ -1,24 +1,34 @@
 # 网球挥拍测评
 
-上传训练视频：先做 2D 姿态与挥拍检测，再用 **Cursor Cloud Agent（Grok 4.6 Extra High）** 结合关键帧写评。
-
-调用方式与 `../AIVideo` 的 `cursor_client.py` 相同：`POST /v1/agents`，`model.id = grok-4.6`，`params.effort = xhigh`。
+上传训练录像，生成评分和练习建议。
 
 ## 本地运行
 
 ```bash
-cp .env.example .env   # 填 CURSOR_API_KEY 与 CURSOR_SANDBOX_REPO_URL
+cp .env.example .env
+# 填入点评服务与对象存储配置
 ./run_web.sh
-# 打开 http://127.0.0.1:8766
+# 打开 http://127.0.0.1:27116
 ```
 
-把样例视频放到 `samples/demo.mp4` 后，可点「分析样例视频」。
+把样例视频放到 `samples/demo.mp4` 后，可点「分析 1 分钟样例」（只分析前 60 秒）。自己上传的视频按整段分析。
 
 ## 环境变量
 
-- `CURSOR_API_KEY`：Cursor Dashboard → Integrations
-- `CURSOR_SANDBOX_REPO_URL`：Cloud Agent 挂载的 GitHub 仓库
-- `CURSOR_MODEL_ID`：默认 `grok-4.6`
-- `CURSOR_MODEL_EFFORT`：默认 `xhigh`（Extra High）
+点评服务：
 
-未配置密钥时，报告会回退到规则引擎文案。
+- `CURSOR_API_KEY`
+- `CURSOR_SANDBOX_REPO_URL`
+- `CURSOR_MODEL_ID`（默认 `grok-4.6`）
+- `CURSOR_MODEL_EFFORT`（默认 `xhigh`）
+
+对象存储（与 english-test 相同 bucket / prefix）：
+
+- `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET`
+- `OSS_BUCKET`（默认 `nba-dev-sh`）
+- `OSS_PREFIX`（默认 `wenbo`，对象在 `{prefix}/tennis-ai/{job_id}/`）
+- `OSS_REGION` / `OSS_ENDPOINT`
+- `OSS_URL_MODE=signed`
+- `OSS_SIGNED_URL_SECONDS`（默认 7 天）
+
+未配置或调用失败时任务会直接报错，不会改用本地文案或本地文件地址。

@@ -8,9 +8,18 @@ models/*.pt
 yolov8*.pt
 runs/
 outputs/
-samples/*.mp4
-*.mp4
-*.pdf
 .DS_Store
 .idea/
 .vscode/
+
+# Large local media not required to run the app
+*.mp4
+*.mov
+*.webm
+*.avi
+*.m4v
+*.mkv
+*.pdf
+samples/*.mp4
+samples/*.mov
+samples/*.webm

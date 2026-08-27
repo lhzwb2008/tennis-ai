@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Tennis Motion Lab · 挥拍测评</title>
+  <title>网球挥拍测评</title>
   <style>
     :root {
       --bg: #0b100e;
@@ -73,8 +73,11 @@
       background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px;
     }
     .card h3 { margin: 0 0 10px; font-size: 14px; }
+    .preview-box {
+      width: 100%; aspect-ratio: 16/10; background: #000; border-radius: 10px; overflow: hidden;
+    }
     .preview {
-      width: 100%; aspect-ratio: 16/10; object-fit: cover; background: #000; border-radius: 10px; display: block;
+      width: 100%; height: 100%; object-fit: cover; display: block;
     }
     .paper {
       background: var(--paper); color: var(--ink); border-radius: 18px; padding: 36px 40px 48px;
@@ -150,9 +153,9 @@
   <div class="wrap">
     <header class="hero no-print">
       <div>
-        <div class="brand">Tennis Motion Lab</div>
+        <div class="brand">网球测评</div>
         <h1>上传视频，生成挥拍测评报告</h1>
-        <p class="sub">先用姿态流水线检出挥拍和指标，再用 Cursor Cloud 的 Grok 4.6 Extra High 看关键帧写评。规则引擎只作为测量底稿和失败回退。</p>
+        <p class="sub">把训练录像传上来，我们会帮你找出每一次挥拍，给出评分和练习建议。</p>
       </div>
       <button class="ghost" id="again" type="button" hidden>再分析一段</button>
     </header>
@@ -160,24 +163,18 @@
     <section id="upload" class="no-print">
       <div class="drop" id="drop">
         <h2>把训练视频拖到这里</h2>
-        <p class="sub" style="margin:0 auto">建议背面或侧面、球员尽量完整入画。默认只分析前 90 秒。</p>
+        <p class="sub" style="margin:0 auto">建议背面或侧面拍摄，人尽量完整入画。自己上传请用 1 分钟左右的录像，我们会按整段分析。</p>
         <div class="row">
-          <select id="seconds">
-            <option value="30">分析 30 秒</option>
-            <option value="60">分析 60 秒</option>
-            <option value="90" selected>分析 90 秒</option>
-            <option value="120">分析 120 秒</option>
-          </select>
           <select id="stroke">
             <option value="auto" selected>自动识别正反手</option>
             <option value="forehand">只按正手</option>
             <option value="backhand">只按反手</option>
           </select>
           <button class="btn" id="pick" type="button">选择文件</button>
-          <button class="btn primary" id="sample" type="button">分析样例视频</button>
+          <button class="btn primary" id="sample" type="button">分析 1 分钟样例</button>
         </div>
         <input id="file" type="file" accept="video/mp4,video/quicktime,video/webm" hidden />
-        <p class="hint">支持 mp4 / mov / webm。样例为背面原视频，适合做第一版单机位流水线。</p>
+        <p class="hint">支持 mp4 / mov / webm。样例会分析前 60 秒，方便你先看效果。</p>
       </div>
     </section>
 
@@ -187,8 +184,10 @@
       <p id="msg" class="sub">准备中…</p>
       <div class="live">
         <div class="card">
-          <h3>实时骨架预览</h3>
-          <img class="preview" id="preview" alt="分析预览" />
+          <h3>分析预览</h3>
+          <div class="preview-box">
+            <img class="preview hidden" id="preview" alt="" />
+          </div>
         </div>
         <div class="card">
           <h3>当前步骤</h3>
@@ -202,11 +201,11 @@
 
   <script>
     const STEPS = [
-      ["读取视频", "打开文件并截取时长"],
-      ["姿态估计", "YOLOv8-pose 17 关键点"],
-      ["检测挥拍", "手腕速度峰值"],
-      ["计算指标", "肘角 / 膝角 / 步幅 / 引拍"],
-      ["云端点评", "Cursor Grok 4.6 Extra High"],
+      ["读取视频", "打开你的录像"],
+      ["识别动作", "看清挥拍动作"],
+      ["找出挥拍", "标出每一次击球"],
+      ["整理数据", "整理评分依据"],
+      ["教练点评", "生成练习建议"],
     ];
     const $ = (id) => document.getElementById(id);
     const upload = $("upload"), analyzing = $("analyzing"), reportEl = $("report");
@@ -234,7 +233,6 @@
 
     async function startUpload(f, sample=false) {
       const fd = new FormData();
-      fd.append("max_seconds", $("seconds").value);
       fd.append("stroke", $("stroke").value);
       fd.append("sample", sample ? "1" : "0");
       if (f) fd.append("video", f);
@@ -259,11 +257,16 @@
       paintSteps(job.step || 1);
       $("msg").textContent = job.message || "";
       $("detail").innerHTML = `
-        来源：${esc(job.source_name || "")}<br/>
-        状态：${esc(job.status)} · ${job.progress || 0}%<br/>
-        检出率：${job.detected_pct != null ? job.detected_pct + "%" : "计算中"}`;
-      if (job.preview_url) {
-        $("preview").src = job.preview_url + "?r=" + (job.preview_rev || Date.now());
+        ${esc(job.source_name || "")}<br/>
+        ${esc(job.step_name || "分析中")} · ${job.progress || 0}%`;
+      if (job.preview_rev) {
+        const img = $("preview");
+        const next = "api/jobs/" + id + "/preview?r=" + job.preview_rev;
+        img.classList.remove("hidden");
+        if (img.dataset.rev !== String(job.preview_rev)) {
+          img.dataset.rev = String(job.preview_rev);
+          img.src = next;
+        }
       }
       if (job.status === "done") {
         const r = await fetch("api/jobs/" + id + "/report");
@@ -272,7 +275,7 @@
         return;
       }
       if (job.status === "error") {
-        $("msg").textContent = "分析失败：" + (job.error || job.message);
+        $("msg").textContent = "分析失败：" + (job.message || job.error || "请稍后重试");
         $("again").hidden = false;
         return;
       }
@@ -314,7 +317,7 @@
     function chart(series, swings) {
       const w = 640, h = 150, pad = 18;
       const ys = (series.wrist_speed || []).map((v) => v == null ? 0 : v);
-      if (!ys.length) return "<p class='note'>没有速度曲线</p>";
+      if (!ys.length) return "<p class='note'>没有挥拍节奏数据</p>";
       const max = Math.max(...ys, 1);
       const xs = series.t;
       const x0 = xs[0], x1 = xs[xs.length - 1] || 1;
@@ -329,7 +332,7 @@
       }).join("");
       return `<svg class="chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${marks}
         <path d="${d}" fill="none" stroke="#1f4a38" stroke-width="1.8"/></svg>
-        <div class="note">手腕速度（像素/秒）· 绿线正手峰值 · 金线反手峰值</div>`;
+        <div class="note">绿线为正手，金线为反手</div>`;
     }
 
     function renderClip(clip) {
@@ -338,26 +341,25 @@
       const swings = clip.swings.map((s) => {
         const late = s.late_contact
           ? `<span class="pill bad">击球偏晚倾向</span>`
-          : `<span class="pill ok">时序正常</span>`;
+          : `<span class="pill ok">击球时机正常</span>`;
         const figs = ["ready", "takeback", "contact", "follow"].map((k) => {
           const p = s.phases[k];
-          const name = { ready: "准备", takeback: "引拍", contact: "击球(速度峰)", follow: "随挥" }[k];
+          const name = { ready: "准备", takeback: "引拍", contact: "击球", follow: "随挥" }[k];
           return `<figure><img src="${p.image}" alt="${name}"/><figcaption>${name} · ${p.t.toFixed(2)}s</figcaption></figure>`;
         }).join("");
-        const tb = s.takeback_ratio != null ? `引拍比 ${s.takeback_ratio}` : "";
         return `<article class="swing">
-          <div class="barline"><span>挥拍 #${s.index} · t=${s.contact_t.toFixed(2)}s · 肘 ${s.elbow_deg ?? "–"}° · 膝 ${s.knee_deg ?? "–"}° · 步幅 ${s.stance_ratio ?? "–"} ${tb}</span>${late}</div>
+          <div class="barline"><span>挥拍 ${s.index} · ${s.contact_t.toFixed(1)} 秒</span>${late}</div>
           <div class="phases">${figs}</div>
         </article>`;
       }).join("");
       return `
         <div class="grid2">
           <div class="panel">
-            <h3>手腕速度与挥拍事件</h3>
+            <h3>挥拍节奏</h3>
             ${chart(clip.series, clip.swings.map(s => ({...s, stroke: clip.stroke})))}
           </div>
           <div class="panel">
-            <h3>规则引擎结论</h3>
+            <h3>教练点评</h3>
             <b>优点</b>
             <ul>${a.strengths.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
             <b>问题</b>
@@ -392,10 +394,10 @@
         <article class="paper">
           <div class="cover">
             <div>
-              <div class="kicker">TENNIS MOTION LAB · REPORT</div>
+              <div class="kicker">挥拍测评报告</div>
               <h1>${esc(data.title)}</h1>
-              <p class="meta">${esc(data.source_name)} · ${data.view_label}机位 · ${data.handedness_label} · ${data.duration_s}s · ${data.n_frames} 帧 · 姿态检出 ${(data.detect_rate*100).toFixed(0)}%</p>
-              <p class="meta">检出挥拍 ${o.n_swings} 次 · 生成于 ${esc(data.generated_at)}${data.coach && data.coach.model ? ` · 点评 ${esc(data.coach.model)} Extra High` : ""}</p>
+              <p class="meta">${esc(data.source_name)} · ${data.view_label}拍摄 · ${data.handedness_label} · ${data.duration_s} 秒</p>
+              <p class="meta">识别到挥拍 ${o.n_swings} 次 · 生成于 ${esc(data.generated_at)}</p>
               ${data.summary ? `<p style="margin:12px 0 0">${esc(data.summary)}</p>` : ""}
               ${data.overlay_video ? `<video class="overlay" src="${data.overlay_video}" controls playsinline style="margin-top:16px"></video>` : ""}
             </div>
@@ -411,7 +413,7 @@
             <div class="bars">${bars}</div>
           </div>
           <div class="panel" style="margin-bottom:18px">
-            <h3>全场速度曲线</h3>
+            <h3>全程挥拍节奏</h3>
             ${chart(data.series, data.timeline)}
           </div>
           <div class="tabs" id="tabs">${data.clips.map((c,i) =>
@@ -423,7 +425,7 @@
       const clipBox = reportEl.querySelector("#clip");
       const paint = () => {
         if (!data.clips.length) {
-          clipBox.innerHTML = "<p>没有检出挥拍。</p>";
+          clipBox.innerHTML = "<p>没有识别到完整挥拍。</p>";
           return;
         }
         clipBox.innerHTML = renderClip(data.clips[cur]);

@@ -1,4 +1,4 @@
-"""Call Cursor Cloud Agent (Grok 4.6 Extra High) to write the coaching report."""
+"""Call Cursor Cloud Agent to write the coaching report."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ from pipeline.analyze import grade_from_score
 from pipeline.cursor_client import available, create_agent, model_id, model_params, run_with_stream
 
 ProgressCb = Callable[[dict], None]
+
+_SCORE_KEYS = ("综合", "重心", "动力链", "动作框架", "步伐", "手腕")
 
 
 def _extract_json(text: str) -> dict | None:
@@ -52,7 +54,7 @@ def _pick_keyframes(clips: list[dict], kf_dir: Path, limit: int = 5) -> list[tup
         for sw in clip.get("swings") or []:
             for phase in order:
                 info = (sw.get("phases") or {}).get(phase) or {}
-                name = Path(str(info.get("image") or "")).name
+                name = Path(str(info.get("image") or info.get("oss_key") or "")).name
                 if not name or name in seen:
                     continue
                 path = kf_dir / name
@@ -105,16 +107,17 @@ def _slim_report(report: dict) -> dict:
 
 def _build_prompt(report: dict, captions: list[str]) -> str:
     payload = json.dumps(_slim_report(report), ensure_ascii=False, indent=2)
-    caps = "\n".join(f"- 图片{i+1}: {c}" for i, c in enumerate(captions)) or "（无关键帧）"
-    return f"""你是网球私教。这是一次单机位训练视频测评。
+    caps = "\n".join(f"- 图片{i+1}: {c}" for i, c in enumerate(captions)) or "（无附图）"
+    return f"""你是网球私教。这是一次训练视频测评。
 
 【硬性要求】
 - 不要修改仓库里的任何文件，不要 git commit / 开 PR。
 - 不要打开无关代码。直接根据测量数据和附图给出中文点评。
 - 附图最多 5 张，顺序如下：
 {caps}
-- 测量来自 YOLOv8 2D 姿态：击球帧是手腕速度峰值，可能比真实触球略晚；背面机位无法直接看击球点前后距离和拍面。
-- 规则引擎分数只是参考，你可以按画面改分数，但不要编造视频里没有的动作。
+- 测量来自录像画面上的人体关键点：击球帧是手腕速度峰值，可能比真实触球略晚；背面机位无法直接看击球点前后距离和拍面。
+- 下列测量分数只是参考，你可以按画面改分数，但不要编造视频里没有的动作。
+- 点评写给普通球友，不要出现模型名、算法名、规则引擎、像素、关键点、流水线等技术词。
 - 训练建议用「【问题】… → 【原因】… → 【训练】…」句式。
 
 【测量 JSON】
@@ -138,33 +141,35 @@ def _build_prompt(report: dict, captions: list[str]) -> str:
 """
 
 
-def _merge_scores(src: dict | None, fallback: dict) -> dict:
+def _require_scores(src: dict | None) -> dict:
     if not isinstance(src, dict):
-        return fallback
-    out = dict(fallback)
-    for k in ("综合", "重心", "动力链", "动作框架", "步伐", "手腕"):
+        raise RuntimeError("点评结果不完整，请稍后重试")
+    out = {}
+    for k in _SCORE_KEYS:
         v = src.get(k)
-        if isinstance(v, (int, float)):
-            out[k] = int(round(v))
+        if not isinstance(v, (int, float)):
+            raise RuntimeError("点评结果不完整，请稍后重试")
+        out[k] = int(round(v))
     return out
 
 
+def _require_lines(src: dict, key: str) -> list[str]:
+    val = src.get(key)
+    if not isinstance(val, list) or not val:
+        raise RuntimeError("点评结果不完整，请稍后重试")
+    lines = [str(x).strip() for x in val if str(x).strip()]
+    if not lines:
+        raise RuntimeError("点评结果不完整，请稍后重试")
+    return lines
+
+
 def enrich_with_cursor(report: dict, kf_dir: Path, progress: ProgressCb | None = None) -> dict:
-    """Replace rule-engine prose with Cursor Grok 4.6 Extra High. Keep metrics if the call fails."""
-    coach = {
-        "model": model_id(),
-        "params": model_params(),
-        "status": "skipped",
-    }
-    report["coach"] = coach
-    if not available():
-        coach["status"] = "skipped"
-        coach["message"] = "未配置 CURSOR_API_KEY / CURSOR_SANDBOX_REPO_URL，使用规则引擎文案"
-        return report
     if not report.get("clips"):
-        coach["status"] = "skipped"
-        coach["message"] = "没有挥拍，跳过云端点评"
+        report["coach"] = {"status": "unused"}
         return report
+
+    if not available():
+        raise RuntimeError("点评服务未就绪，请稍后重试")
 
     picks = _pick_keyframes(report["clips"], Path(kf_dir))
     images = []
@@ -174,63 +179,79 @@ def enrich_with_cursor(report: dict, kf_dir: Path, progress: ProgressCb | None =
         if enc:
             images.append(enc)
             captions.append(cap)
+    if not images:
+        raise RuntimeError("无法生成动作截图，请换一段更清晰的录像再试")
 
     prompt = _build_prompt(report, captions)
     if progress:
         progress(
             {
                 "step": 5,
-                "step_name": "云端点评",
+                "step_name": "教练点评",
                 "progress": 90,
-                "message": f"调用 Cursor Cloud · {model_id()} Extra High（{len(images)} 张关键帧）…",
+                "message": "正在生成教练点评…",
             }
         )
 
-    agent_id, run_id = create_agent(prompt, images=images or None)
-    coach["agent_id"] = agent_id
-    coach["run_id"] = run_id
+    try:
+        agent_id, run_id = create_agent(prompt, images=images)
+    except Exception as exc:
+        raise RuntimeError("教练点评失败，请稍后重试") from exc
+
+    coach = {
+        "model": model_id(),
+        "params": model_params(),
+        "status": "running",
+        "agent_id": agent_id,
+        "run_id": run_id,
+    }
+    report["coach"] = coach
 
     def _delta(_t: str) -> None:
         if progress:
             progress(
                 {
                     "step": 5,
-                    "step_name": "云端点评",
+                    "step_name": "教练点评",
                     "progress": 93,
-                    "message": "Grok 4.6 Extra High 正在写评…",
+                    "message": "正在撰写练习建议…",
                 }
             )
 
-    text, status = run_with_stream(agent_id, run_id, on_assistant=_delta)
+    try:
+        text, status = run_with_stream(agent_id, run_id, on_assistant=_delta)
+    except Exception as exc:
+        raise RuntimeError("教练点评失败，请稍后重试") from exc
+
     coach["status"] = status
     parsed = _extract_json(text)
     if status != "FINISHED" or not parsed:
-        coach["message"] = f"云端点评未成功（{status}），报告保留规则引擎文案"
-        coach["raw"] = (text or "")[:4000]
-        return report
+        raise RuntimeError("教练点评未完成，请稍后重试")
 
     summary = parsed.get("summary")
-    if isinstance(summary, str) and summary.strip():
-        report["summary"] = summary.strip()
-        coach["summary"] = summary.strip()
+    if not isinstance(summary, str) or not summary.strip():
+        raise RuntimeError("点评结果不完整，请稍后重试")
+    report["summary"] = summary.strip()
+    coach["summary"] = summary.strip()
 
-    overall_scores = _merge_scores(parsed.get("scores"), report["overall"]["scores"])
+    overall_scores = _require_scores(parsed.get("scores"))
     report["overall"]["scores"] = overall_scores
-    report["overall"]["score"] = int(overall_scores.get("综合") or report["overall"]["score"])
+    report["overall"]["score"] = int(overall_scores["综合"])
     grade, grade_label = grade_from_score(int(report["overall"]["score"]))
     report["overall"]["grade"] = grade
     report["overall"]["grade_label"] = grade_label
 
     by_id = {c["id"]: c for c in parsed.get("clips") or [] if isinstance(c, dict) and c.get("id")}
     for clip in report["clips"]:
-        extra = by_id.get(clip["id"]) or {}
-        if extra.get("scores"):
-            clip["scores"] = _merge_scores(extra.get("scores"), clip["scores"])
+        extra = by_id.get(clip["id"])
+        if not extra:
+            raise RuntimeError("点评结果不完整，请稍后重试")
+        clip["scores"] = _require_scores(extra.get("scores"))
         analysis = clip.setdefault("analysis", {})
-        for key in ("strengths", "problems", "drills"):
-            val = extra.get(key)
-            if isinstance(val, list) and val:
-                analysis[key] = [str(x) for x in val if str(x).strip()]
+        analysis["strengths"] = _require_lines(extra, "strengths")
+        analysis["problems"] = _require_lines(extra, "problems")
+        analysis["drills"] = _require_lines(extra, "drills")
 
-    coach["message"] = "Cursor Grok 4.6 Extra High 点评完成"
+    coach["status"] = "FINISHED"
+    coach["message"] = "点评完成"
     return report

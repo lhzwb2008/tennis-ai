@@ -32,6 +32,7 @@ from pipeline.analyze import (
     wrist_track,
 )
 from pipeline.coach import enrich_with_cursor
+from pipeline.oss import object_key, require_configured, upload_file
 from pipeline.pose import PoseEstimator, draw_pose
 
 LR_PAIRS = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16)]
@@ -70,14 +71,6 @@ ProgressCb = Callable[[dict], None]
 
 _EST: PoseEstimator | None = None
 
-WORKFLOW = [
-    "读取视频并截取分析时长",
-    "YOLOv8-pose 逐帧估计 17 点骨架，并烧入叠加视频",
-    "用左右手腕速度峰值检测挥拍，自动区分正手 / 反手",
-    "计算肘角、膝角、重心高度比、步幅比、引拍幅度",
-    "Cursor Cloud Agent（Grok 4.6 Extra High）结合关键帧与指标写评",
-]
-
 
 def json_default(o):
     if isinstance(o, np.generic):
@@ -110,7 +103,7 @@ def downsample_series(series, every: int = 4) -> dict:
     }
 
 
-def _encode_h264(src: Path, dst: Path) -> bool:
+def _encode_h264(src: Path, dst: Path) -> None:
     try:
         subprocess.run(
             [
@@ -132,20 +125,19 @@ def _encode_h264(src: Path, dst: Path) -> bool:
             ],
             check=True,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
+    except FileNotFoundError as exc:
+        raise RuntimeError("视频处理失败，请稍后重试") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError("视频处理失败，请稍后重试") from exc
 
 
-def _draw_hud(frame: np.ndarray, t: float, ok: bool, done: int, total: int) -> np.ndarray:
+def _draw_hud(frame: np.ndarray, t: float, ok: bool, _done: int, _total: int) -> np.ndarray:
     out = frame.copy()
     h, w = out.shape[:2]
     cv2.rectangle(out, (8, 8), (min(w - 8, 420), 54), (12, 16, 22), -1)
-    label = f"YOLO pose  t={t:5.2f}s  {done}/{total}"
-    if not ok:
-        label += "  miss"
+    label = f"{t:.1f}s"
     cv2.putText(
         out,
         label,
@@ -171,6 +163,12 @@ def _save_phase(path: Path, view, pose, tag: str) -> None:
     cv2.imwrite(str(path), vis, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
 
 
+def _publish(job_id: str, rel: str, path: Path) -> dict:
+    if not path.is_file():
+        raise RuntimeError("保存文件失败，请稍后重试")
+    return upload_file(path, object_key(job_id, rel))
+
+
 def _emit(cb: ProgressCb | None, **payload) -> None:
     if cb:
         cb(payload)
@@ -180,10 +178,9 @@ def analyze_video(
     video_path: Path,
     out_dir: Path,
     *,
-    max_seconds: float = 90.0,
+    max_seconds: float = 0.0,
     stroke_mode: str = "auto",
     title: str | None = None,
-    media_url_base: str = "",
     estimator: PoseEstimator | None = None,
     progress: ProgressCb | None = None,
 ) -> dict:
@@ -192,34 +189,34 @@ def analyze_video(
     out_dir.mkdir(parents=True, exist_ok=True)
     kf_dir = out_dir / "keyframes"
     kf_dir.mkdir(parents=True, exist_ok=True)
+    job_id = out_dir.name
+    require_configured()
 
-    base = media_url_base.rstrip("/")
-
-    def media(name: str) -> str:
-        return f"{base}/{name}" if base else name
-
-    _emit(progress, step=1, step_name="读取视频", progress=3, message="打开视频文件…")
+    _emit(progress, step=1, step_name="读取视频", progress=3, message="正在打开你的录像…")
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        raise RuntimeError(f"无法打开视频：{video_path}")
+        raise RuntimeError("打不开这段视频，请换一个文件再试")
 
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
     n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 960)
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 544)
-    max_frames = int(max_seconds * fps) if max_seconds > 0 else n_total
-    if n_total > 0:
-        max_frames = min(max_frames, n_total)
+    if max_seconds and max_seconds > 0:
+        max_frames = int(max_seconds * fps)
+        if n_total > 0:
+            max_frames = min(max_frames, n_total)
+    else:
+        max_frames = n_total if n_total > 0 else 10**9
     target = max(1, max_frames)
 
     est = estimator or get_estimator()
     _emit(
         progress,
         step=2,
-        step_name="姿态估计",
+        step_name="识别动作",
         progress=8,
-        message=f"加载模型完成，开始逐帧估计（最多 {target} 帧）…",
+        message="正在识别球员动作…",
     )
 
     fd, tmp_name = tempfile.mkstemp(suffix=".mp4")
@@ -238,6 +235,21 @@ def analyze_video(
     preview_path = out_dir / "preview.jpg"
     i = 0
 
+    ok, first = cap.read()
+    if not ok:
+        cap.release()
+        raise RuntimeError("这段视频没有可用画面，请换一段再试")
+    cv2.imwrite(str(preview_path), first, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
+    _emit(
+        progress,
+        step=2,
+        step_name="识别动作",
+        progress=8,
+        message="正在识别球员动作…",
+        preview=True,
+    )
+    buf.append(first)
+
     def flush():
         nonlocal i
         if not buf:
@@ -255,11 +267,10 @@ def analyze_video(
                 _emit(
                     progress,
                     step=2,
-                    step_name="姿态估计",
+                    step_name="识别动作",
                     progress=8 + int(62 * (i + 1) / target),
-                    message=f"已处理 {i + 1} / {target} 帧",
+                    message="正在识别球员动作…",
                     preview=True,
-                    detected_pct=round(100 * sum(ok_flags) / max(len(ok_flags), 1), 1),
                 )
             i += 1
         buf.clear()
@@ -276,16 +287,19 @@ def analyze_video(
     writer.release()
 
     overlay_path = out_dir / "overlay.mp4"
-    _emit(progress, step=2, step_name="姿态估计", progress=72, message="正在编码叠加视频…")
-    if not _encode_h264(raw_path, overlay_path):
-        overlay_path.write_bytes(raw_path.read_bytes())
+    _emit(progress, step=2, step_name="识别动作", progress=72, message="正在生成回放…")
+    _encode_h264(raw_path, overlay_path)
+    overlay_pub = _publish(job_id, "overlay.mp4", overlay_path)
+    if not preview_path.is_file():
+        raise RuntimeError("无法生成预览，请换一段录像再试")
+    preview_pub = _publish(job_id, "preview.jpg", preview_path)
     try:
         raw_path.unlink(missing_ok=True)
     except OSError:
         pass
 
     if not ts:
-        raise RuntimeError("视频没有可读帧")
+        raise RuntimeError("这段视频没有可用画面，请换一段再试")
 
     t_arr = np.array(ts, dtype=np.float64)
     detect_rate = float(np.mean(ok_flags)) if ok_flags else 0.0
@@ -295,7 +309,7 @@ def analyze_video(
     takeback_mode = "distance"
     enable_late = view == "side"
 
-    _emit(progress, step=3, step_name="检测挥拍", progress=78, message="根据手腕速度检测挥拍峰值…")
+    _emit(progress, step=3, step_name="找出挥拍", progress=78, message="正在找出每一次挥拍…")
 
     l_spd = speed_from_xy(wrist_track(xy_list, conf_list, "l_wrist"), t_arr)
     r_spd = speed_from_xy(wrist_track(xy_list, conf_list, "r_wrist"), t_arr)
@@ -312,9 +326,9 @@ def analyze_video(
     _emit(
         progress,
         step=4,
-        step_name="计算指标",
+        step_name="整理数据",
         progress=84,
-        message=f"检出 {len(peaks)} 次挥拍，正在计算生物力学指标…",
+        message=f"已找到 {len(peaks)} 次挥拍，正在整理评分…",
     )
 
     clips = []
@@ -373,7 +387,7 @@ def analyze_video(
         labels_zh = {
             "ready": "准备",
             "takeback": "引拍",
-            "contact": "击球(速度峰)",
+            "contact": "击球",
             "follow": "随挥",
         }
         for si, sw in enumerate(swings, 1):
@@ -389,9 +403,13 @@ def analyze_video(
                 if fi in grabbed:
                     frame, pose = grabbed[fi]
                     _save_phase(abs_path, frame, pose, labels_zh[name])
+                if not abs_path.is_file():
+                    raise RuntimeError("动作截图生成失败，请换一段更清晰的录像再试")
+                published = _publish(job_id, f"keyframes/{fname}", abs_path)
                 phases[name] = {
                     "t": round(float(series.t[fi]), 3),
-                    "image": media(f"keyframes/{fname}"),
+                    "image": published["url"],
+                    "oss_key": published["key"],
                 }
             swing_payload.append(
                 {
@@ -468,15 +486,19 @@ def analyze_video(
     cover_rel = "cover.jpg"
     cover_abs = out_dir / cover_rel
     if clips and clips[0]["swings"]:
-        img = clips[0]["swings"][0]["phases"]["contact"]["image"]
-        # copy first contact frame as cover
-        src = kf_dir / Path(img).name
-        if src.exists():
+        contact = clips[0]["swings"][0]["phases"]["contact"]
+        src = kf_dir / Path(str(contact.get("oss_key") or "")).name
+        if src.is_file():
             cover_abs.write_bytes(src.read_bytes())
-        elif preview_path.exists():
+        elif preview_path.is_file():
             cover_abs.write_bytes(preview_path.read_bytes())
-    elif preview_path.exists():
+    elif preview_path.is_file():
         cover_abs.write_bytes(preview_path.read_bytes())
+    if not cover_abs.is_file() and preview_path.is_file():
+        cover_abs.write_bytes(preview_path.read_bytes())
+    if not cover_abs.is_file():
+        raise RuntimeError("无法生成封面，请换一段录像再试")
+    cover_pub = _publish(job_id, cover_rel, cover_abs)
 
     if dummy_series is not None:
         combined_series = {
@@ -502,10 +524,12 @@ def analyze_video(
         "detect_rate": round(detect_rate, 3),
         "max_seconds": max_seconds,
         "stroke_mode": stroke_mode,
-        "overlay_video": media("overlay.mp4"),
-        "cover_image": media(cover_rel) if cover_abs.exists() else media("preview.jpg"),
-        "preview": media("preview.jpg"),
-        "workflow": WORKFLOW,
+        "overlay_video": overlay_pub["url"],
+        "overlay_oss_key": overlay_pub["key"],
+        "cover_image": cover_pub["url"],
+        "cover_oss_key": cover_pub["key"],
+        "preview": preview_pub["url"],
+        "preview_oss_key": preview_pub["key"],
         "overall": {
             "score": int(overall_scores["综合"]),
             "grade": grade,
@@ -518,30 +542,25 @@ def analyze_video(
         "clips": clips,
         "caveats": all_caveats
         or [
-            "未检出有效挥拍。请确认画面中球员清晰、挥拍完整，或加长分析时长。",
+            "没有识别到完整挥拍。请换一段人更清楚、挥拍更完整的录像再试。",
         ],
     }
 
-    try:
-        _emit(
-            progress,
-            step=5,
-            step_name="云端点评",
-            progress=88,
-            message="准备关键帧，调用 Cursor Cloud Agent…",
-        )
-        report = enrich_with_cursor(report, kf_dir, progress=progress)
-    except Exception as exc:
-        report.setdefault("coach", {})
-        report["coach"]["status"] = "error"
-        report["coach"]["message"] = f"云端点评失败，已回退规则引擎：{exc}"
+    _emit(
+        progress,
+        step=5,
+        step_name="教练点评",
+        progress=88,
+        message="正在生成教练点评…",
+    )
+    report = enrich_with_cursor(report, kf_dir, progress=progress)
 
-    _emit(progress, step=5, step_name="生成报告", progress=96, message="写入报告文件…")
+    _emit(progress, step=5, step_name="教练点评", progress=96, message="正在整理报告…")
     (out_dir / "report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2, default=json_default),
         encoding="utf-8",
     )
-    _emit(progress, step=5, step_name="生成报告", progress=100, message="分析完成")
+    _emit(progress, step=5, step_name="教练点评", progress=100, message="分析完成")
     return report
 
 
@@ -551,7 +570,7 @@ def main():
     parser = argparse.ArgumentParser(description="Analyze a tennis training video")
     parser.add_argument("video", type=Path)
     parser.add_argument("-o", "--out", type=Path, default=ROOT / "outputs" / "session")
-    parser.add_argument("--max-seconds", type=float, default=90)
+    parser.add_argument("--max-seconds", type=float, default=0)
     parser.add_argument("--stroke", choices=["auto", "forehand", "backhand"], default="auto")
     args = parser.parse_args()
 
