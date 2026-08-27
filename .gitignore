@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+models/*.task
+models/*.pt
+yolov8*.pt
+runs/
+outputs/
+samples/*.mp4
+*.mp4
+*.pdf
+.DS_Store
+.idea/
+.vscode/

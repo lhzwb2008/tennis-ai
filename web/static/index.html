@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tennis Motion Lab · 挥拍测评</title>
+  <style>
+    :root {
+      --bg: #0b100e;
+      --bg2: #121a16;
+      --panel: #17211c;
+      --line: #2a3a32;
+      --text: #eef4ee;
+      --muted: #8ea196;
+      --ball: #d4e157;
+      --gold: #c9a24a;
+      --navy: #1c3a4a;
+      --good: #5dcea2;
+      --warn: #e0b25c;
+      --bad: #e07a7a;
+      --paper: #f4efe4;
+      --ink: #1a2420;
+      --ink-muted: #5c6b62;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      font: 15px/1.6 "PingFang SC", "Noto Sans SC", "Hiragino Sans GB", sans-serif;
+      background:
+        radial-gradient(1200px 600px at 80% -10%, #1c3324 0%, transparent 55%),
+        linear-gradient(180deg, var(--bg), #070b09);
+      color: var(--text);
+    }
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 28px 22px 80px; }
+    header.hero { display: flex; justify-content: space-between; gap: 24px; align-items: flex-end; margin-bottom: 28px; }
+    .brand { letter-spacing: .18em; font-size: 11px; color: var(--ball); text-transform: uppercase; }
+    h1 { margin: 8px 0 6px; font-size: 32px; font-weight: 650; letter-spacing: -.02em; }
+    .sub { margin: 0; color: var(--muted); max-width: 640px; }
+    .ghost {
+      background: transparent; color: var(--muted); border: 1px solid var(--line);
+      border-radius: 999px; padding: 8px 14px; cursor: pointer; font: inherit;
+    }
+    .drop {
+      border: 1px dashed #3d5347; border-radius: 18px; padding: 36px 28px;
+      background: linear-gradient(180deg, #15201b, #101713); text-align: center;
+    }
+    .drop.over { border-color: var(--ball); background: #18261e; }
+    .drop h2 { margin: 0 0 8px; font-size: 20px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-top: 18px; }
+    select, .btn {
+      font: inherit; border-radius: 999px; padding: 10px 16px; border: 1px solid var(--line);
+      background: var(--panel); color: var(--text);
+    }
+    .btn.primary {
+      background: var(--ball); color: #15200f; border-color: var(--ball); font-weight: 650; cursor: pointer;
+    }
+    .btn { cursor: pointer; }
+    .hint { color: var(--muted); font-size: 12px; margin-top: 14px; }
+    .steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin: 22px 0; }
+    .step {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px;
+      color: var(--muted); font-size: 12px;
+    }
+    .step b { display: block; color: var(--text); font-size: 13px; margin-bottom: 4px; }
+    .step.on { border-color: var(--ball); color: #cfe39a; }
+    .step.done { border-color: #2f6b4e; }
+    .progress {
+      height: 8px; background: #223028; border-radius: 99px; overflow: hidden; margin: 8px 0 18px;
+    }
+    .progress > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #7fa83a, var(--ball)); transition: width .35s; }
+    .live { display: grid; grid-template-columns: 1.1fr .9fr; gap: 16px; }
+    .card {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px;
+    }
+    .card h3 { margin: 0 0 10px; font-size: 14px; }
+    .preview {
+      width: 100%; aspect-ratio: 16/10; object-fit: cover; background: #000; border-radius: 10px; display: block;
+    }
+    .paper {
+      background: var(--paper); color: var(--ink); border-radius: 18px; padding: 36px 40px 48px;
+      box-shadow: 0 30px 80px rgba(0,0,0,.35);
+    }
+    .paper h1, .paper h2, .paper h3 { color: var(--ink); }
+    .cover {
+      display: grid; grid-template-columns: 1.3fr .7fr; gap: 28px; padding-bottom: 28px;
+      border-bottom: 1px solid #ddd4c4; margin-bottom: 28px;
+    }
+    .kicker { letter-spacing: .2em; font-size: 11px; color: #8a7040; }
+    .paper h1 { font-family: Palatino, "Iowan Old Style", "Songti SC", serif; font-size: 36px; margin: 6px 0 8px; }
+    .meta { color: var(--ink-muted); font-size: 13px; }
+    .score-ring {
+      width: 168px; height: 168px; border-radius: 50%; margin: 0 auto;
+      display: grid; place-items: center; color: var(--paper);
+      background: conic-gradient(var(--gold) calc(var(--p) * 1%), #d9d0c0 0);
+    }
+    .score-ring inner, .score-ring .inner {
+      width: 128px; height: 128px; border-radius: 50%; background: var(--paper); color: var(--ink);
+      display: grid; place-items: center; text-align: center;
+    }
+    .score-ring .n { font-size: 42px; font-weight: 700; line-height: 1; }
+    .score-ring .g { font-size: 12px; color: #8a7040; letter-spacing: .12em; }
+    .scores { display: grid; grid-template-columns: 220px 1fr; gap: 24px; margin: 8px 0 28px; }
+    .bars .bar { display: grid; grid-template-columns: 78px 1fr 36px; gap: 8px; align-items: center; margin: 8px 0; font-size: 13px; }
+    .bars .track { height: 8px; background: #e5dccb; border-radius: 99px; overflow: hidden; }
+    .bars .track i { display: block; height: 100%; background: #1f4a38; }
+    .grid2 { display: grid; grid-template-columns: 1.15fr .85fr; gap: 16px; }
+    .panel {
+      background: #fffdf8; border: 1px solid #e6dccb; border-radius: 12px; padding: 14px 16px;
+    }
+    .panel h3 { margin: 0 0 8px; font-size: 14px; }
+    svg.chart { width: 100%; height: 150px; display: block; }
+    ul { margin: 0; padding-left: 18px; }
+    li { margin: 6px 0; }
+    .tabs { display: flex; gap: 8px; margin: 8px 0 14px; }
+    .tab {
+      border: 1px solid #d9d0c0; background: transparent; border-radius: 999px; padding: 6px 14px;
+      cursor: pointer; font: inherit; color: var(--ink-muted);
+    }
+    .tab.on { background: #1f4a38; color: #f4efe4; border-color: #1f4a38; }
+    .swing { border: 1px solid #e6dccb; border-radius: 12px; overflow: hidden; background: #fffdf8; margin-top: 12px; }
+    .swing .barline {
+      display: flex; justify-content: space-between; gap: 8px; padding: 8px 12px; font-size: 12px; color: var(--ink-muted);
+      border-bottom: 1px solid #eee6d8;
+    }
+    .phases { display: grid; grid-template-columns: repeat(4, 1fr); }
+    .phases figure { margin: 0; }
+    .phases img { width: 100%; aspect-ratio: 16/10; object-fit: cover; display: block; background: #111; }
+    .phases figcaption { font-size: 11px; color: var(--ink-muted); padding: 6px 8px 10px; }
+    .pill { font-size: 11px; border: 1px solid #d9d0c0; border-radius: 999px; padding: 2px 8px; }
+    .pill.bad { color: #a33; border-color: #e8b4b4; }
+    .pill.ok { color: #1f4a38; border-color: #b7d4c4; }
+    .actions { display: flex; gap: 8px; justify-content: flex-end; margin: 0 0 16px; }
+    .note { color: var(--ink-muted); font-size: 12px; margin-top: 22px; }
+    .hidden { display: none !important; }
+    video.overlay { width: 100%; border-radius: 12px; background: #000; max-height: 360px; }
+    @media (max-width: 860px) {
+      .cover, .scores, .grid2, .live, .steps, .phases { grid-template-columns: 1fr; }
+      .paper { padding: 22px 16px 32px; }
+      header.hero { flex-direction: column; align-items: flex-start; }
+    }
+    @media print {
+      body { background: white; }
+      .no-print { display: none !important; }
+      .paper { box-shadow: none; padding: 0; }
+      .wrap { padding: 0; max-width: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero no-print">
+      <div>
+        <div class="brand">Tennis Motion Lab</div>
+        <h1>上传视频，生成挥拍测评报告</h1>
+        <p class="sub">先用姿态流水线检出挥拍和指标，再用 Cursor Cloud 的 Grok 4.6 Extra High 看关键帧写评。规则引擎只作为测量底稿和失败回退。</p>
+      </div>
+      <button class="ghost" id="again" type="button" hidden>再分析一段</button>
+    </header>
+
+    <section id="upload" class="no-print">
+      <div class="drop" id="drop">
+        <h2>把训练视频拖到这里</h2>
+        <p class="sub" style="margin:0 auto">建议背面或侧面、球员尽量完整入画。默认只分析前 90 秒。</p>
+        <div class="row">
+          <select id="seconds">
+            <option value="30">分析 30 秒</option>
+            <option value="60">分析 60 秒</option>
+            <option value="90" selected>分析 90 秒</option>
+            <option value="120">分析 120 秒</option>
+          </select>
+          <select id="stroke">
+            <option value="auto" selected>自动识别正反手</option>
+            <option value="forehand">只按正手</option>
+            <option value="backhand">只按反手</option>
+          </select>
+          <button class="btn" id="pick" type="button">选择文件</button>
+          <button class="btn primary" id="sample" type="button">分析样例视频</button>
+        </div>
+        <input id="file" type="file" accept="video/mp4,video/quicktime,video/webm" hidden />
+        <p class="hint">支持 mp4 / mov / webm。样例为背面原视频，适合做第一版单机位流水线。</p>
+      </div>
+    </section>
+
+    <section id="analyzing" class="hidden no-print">
+      <div class="steps" id="steps"></div>
+      <div class="progress"><i id="bar"></i></div>
+      <p id="msg" class="sub">准备中…</p>
+      <div class="live">
+        <div class="card">
+          <h3>实时骨架预览</h3>
+          <img class="preview" id="preview" alt="分析预览" />
+        </div>
+        <div class="card">
+          <h3>当前步骤</h3>
+          <p id="detail" style="margin:0;color:var(--muted)"></p>
+        </div>
+      </div>
+    </section>
+
+    <section id="report" class="hidden"></section>
+  </div>
+
+  <script>
+    const STEPS = [
+      ["读取视频", "打开文件并截取时长"],
+      ["姿态估计", "YOLOv8-pose 17 关键点"],
+      ["检测挥拍", "手腕速度峰值"],
+      ["计算指标", "肘角 / 膝角 / 步幅 / 引拍"],
+      ["云端点评", "Cursor Grok 4.6 Extra High"],
+    ];
+    const $ = (id) => document.getElementById(id);
+    const upload = $("upload"), analyzing = $("analyzing"), reportEl = $("report");
+    const drop = $("drop"), file = $("file");
+
+    function paintSteps(step) {
+      $("steps").innerHTML = STEPS.map((s, i) => {
+        const n = i + 1;
+        const cls = n < step ? "done" : n === step ? "on" : "";
+        return `<div class="step ${cls}"><b>${n}. ${s[0]}</b>${s[1]}</div>`;
+      }).join("");
+    }
+    paintSteps(0);
+
+    $("pick").onclick = () => file.click();
+    $("again").onclick = () => location.reload();
+    drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+    drop.ondragleave = () => drop.classList.remove("over");
+    drop.ondrop = (e) => {
+      e.preventDefault(); drop.classList.remove("over");
+      if (e.dataTransfer.files[0]) startUpload(e.dataTransfer.files[0]);
+    };
+    file.onchange = () => { if (file.files[0]) startUpload(file.files[0]); };
+    $("sample").onclick = () => startUpload(null, true);
+
+    async function startUpload(f, sample=false) {
+      const fd = new FormData();
+      fd.append("max_seconds", $("seconds").value);
+      fd.append("stroke", $("stroke").value);
+      fd.append("sample", sample ? "1" : "0");
+      if (f) fd.append("video", f);
+      upload.classList.add("hidden");
+      analyzing.classList.remove("hidden");
+      paintSteps(1);
+      $("msg").textContent = "正在提交任务…";
+      const res = await fetch("/api/analyze", { method: "POST", body: fd });
+      if (!res.ok) {
+        const t = await res.text();
+        $("msg").textContent = "提交失败：" + t;
+        return;
+      }
+      const { job_id } = await res.json();
+      poll(job_id);
+    }
+
+    async function poll(id) {
+      const res = await fetch("/api/jobs/" + id);
+      const job = await res.json();
+      $("bar").style.width = (job.progress || 0) + "%";
+      paintSteps(job.step || 1);
+      $("msg").textContent = job.message || "";
+      $("detail").innerHTML = `
+        来源：${esc(job.source_name || "")}<br/>
+        状态：${esc(job.status)} · ${job.progress || 0}%<br/>
+        检出率：${job.detected_pct != null ? job.detected_pct + "%" : "计算中"}`;
+      if (job.preview_url) {
+        $("preview").src = job.preview_url + "?r=" + (job.preview_rev || Date.now());
+      }
+      if (job.status === "done") {
+        const r = await fetch("/api/jobs/" + id + "/report");
+        const data = await r.json();
+        showReport(data);
+        return;
+      }
+      if (job.status === "error") {
+        $("msg").textContent = "分析失败：" + (job.error || job.message);
+        $("again").hidden = false;
+        return;
+      }
+      setTimeout(() => poll(id), 700);
+    }
+
+    function esc(s) {
+      return String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+    }
+
+    function radar(scores) {
+      const axes = [
+        ["重心", 30], ["动力链", 25], ["动作框架", 25], ["步伐", 15], ["手腕", 5],
+      ];
+      const cx = 100, cy = 100, r = 78;
+      const pts = axes.map((a, i) => {
+        const ang = -Math.PI / 2 + i * (2 * Math.PI / axes.length);
+        const v = (scores[a[0]] || 0) / a[1];
+        return [cx + Math.cos(ang) * r * v, cy + Math.sin(ang) * r * v];
+      });
+      const grid = [0.4, 0.7, 1].map((k) => {
+        const g = axes.map((a, i) => {
+          const ang = -Math.PI / 2 + i * (2 * Math.PI / axes.length);
+          return `${cx + Math.cos(ang) * r * k},${cy + Math.sin(ang) * r * k}`;
+        }).join(" ");
+        return `<polygon points="${g}" fill="none" stroke="#e5dccb" />`;
+      }).join("");
+      const labels = axes.map((a, i) => {
+        const ang = -Math.PI / 2 + i * (2 * Math.PI / axes.length);
+        const x = cx + Math.cos(ang) * 92;
+        const y = cy + Math.sin(ang) * 92;
+        return `<text x="${x}" y="${y}" text-anchor="middle" dominant-baseline="middle" font-size="10" fill="#5c6b62">${a[0]}</text>`;
+      }).join("");
+      return `<svg viewBox="0 0 200 200" width="220" height="220">${grid}
+        <polygon points="${pts.map(p => p.join(",")).join(" ")}" fill="rgba(31,74,56,.25)" stroke="#1f4a38" stroke-width="1.6"/>
+        ${labels}</svg>`;
+    }
+
+    function chart(series, swings) {
+      const w = 640, h = 150, pad = 18;
+      const ys = (series.wrist_speed || []).map((v) => v == null ? 0 : v);
+      if (!ys.length) return "<p class='note'>没有速度曲线</p>";
+      const max = Math.max(...ys, 1);
+      const xs = series.t;
+      const x0 = xs[0], x1 = xs[xs.length - 1] || 1;
+      const nx = (t) => pad + ((t - x0) / (x1 - x0)) * (w - pad * 2);
+      const ny = (v) => h - pad - (v / max) * (h - pad * 2);
+      let d = "";
+      ys.forEach((v, i) => { d += `${i ? "L" : "M"}${nx(xs[i]).toFixed(1)},${ny(v).toFixed(1)} `; });
+      const marks = (swings || []).map((s) => {
+        const x = nx(s.t != null ? s.t : s.contact_t);
+        const color = s.stroke === "backhand" ? "#c9a24a" : "#1f4a38";
+        return `<line x1="${x}" x2="${x}" y1="${pad}" y2="${h - pad}" stroke="${color}" stroke-width="1" opacity="0.75"/>`;
+      }).join("");
+      return `<svg class="chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${marks}
+        <path d="${d}" fill="none" stroke="#1f4a38" stroke-width="1.8"/></svg>
+        <div class="note">手腕速度（像素/秒）· 绿线正手峰值 · 金线反手峰值</div>`;
+    }
+
+    function renderClip(clip) {
+      const sc = clip.scores;
+      const a = clip.analysis;
+      const swings = clip.swings.map((s) => {
+        const late = s.late_contact
+          ? `<span class="pill bad">击球偏晚倾向</span>`
+          : `<span class="pill ok">时序正常</span>`;
+        const figs = ["ready", "takeback", "contact", "follow"].map((k) => {
+          const p = s.phases[k];
+          const name = { ready: "准备", takeback: "引拍", contact: "击球(速度峰)", follow: "随挥" }[k];
+          return `<figure><img src="${p.image}" alt="${name}"/><figcaption>${name} · ${p.t.toFixed(2)}s</figcaption></figure>`;
+        }).join("");
+        const tb = s.takeback_ratio != null ? `引拍比 ${s.takeback_ratio}` : "";
+        return `<article class="swing">
+          <div class="barline"><span>挥拍 #${s.index} · t=${s.contact_t.toFixed(2)}s · 肘 ${s.elbow_deg ?? "–"}° · 膝 ${s.knee_deg ?? "–"}° · 步幅 ${s.stance_ratio ?? "–"} ${tb}</span>${late}</div>
+          <div class="phases">${figs}</div>
+        </article>`;
+      }).join("");
+      return `
+        <div class="grid2">
+          <div class="panel">
+            <h3>手腕速度与挥拍事件</h3>
+            ${chart(clip.series, clip.swings.map(s => ({...s, stroke: clip.stroke})))}
+          </div>
+          <div class="panel">
+            <h3>规则引擎结论</h3>
+            <b>优点</b>
+            <ul>${a.strengths.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+            <b>问题</b>
+            <ul>${a.problems.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+          </div>
+        </div>
+        <div class="panel" style="margin-top:16px">
+          <h3>训练建议</h3>
+          <ul>${a.drills.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+        </div>
+        <div class="swings">${swings}</div>`;
+    }
+
+    function showReport(data) {
+      analyzing.classList.add("hidden");
+      reportEl.classList.remove("hidden");
+      $("again").hidden = false;
+      const o = data.overall;
+      const sc = o.scores;
+      const bars = [
+        ["重心", 30], ["动力链", 25], ["动作框架", 25], ["步伐", 15], ["手腕", 5],
+      ].map(([k, max]) => {
+        const v = sc[k] || 0;
+        return `<div class="bar"><span>${k}</span><div class="track"><i style="width:${(100*v/max).toFixed(1)}%"></i></div><b>${v}</b></div>`;
+      }).join("");
+      const pct = Math.min(100, o.score);
+      let cur = 0;
+      reportEl.innerHTML = `
+        <div class="actions no-print">
+          <button class="btn" type="button" onclick="window.print()">导出 / 打印报告</button>
+        </div>
+        <article class="paper">
+          <div class="cover">
+            <div>
+              <div class="kicker">TENNIS MOTION LAB · REPORT</div>
+              <h1>${esc(data.title)}</h1>
+              <p class="meta">${esc(data.source_name)} · ${data.view_label}机位 · ${data.handedness_label} · ${data.duration_s}s · ${data.n_frames} 帧 · 姿态检出 ${(data.detect_rate*100).toFixed(0)}%</p>
+              <p class="meta">检出挥拍 ${o.n_swings} 次 · 生成于 ${esc(data.generated_at)}${data.coach && data.coach.model ? ` · 点评 ${esc(data.coach.model)} Extra High` : ""}</p>
+              ${data.summary ? `<p style="margin:12px 0 0">${esc(data.summary)}</p>` : ""}
+              ${data.overlay_video ? `<video class="overlay" src="${data.overlay_video}" controls playsinline style="margin-top:16px"></video>` : ""}
+            </div>
+            <div>
+              <div class="score-ring" style="--p:${pct}"><div class="inner">
+                <div><div class="n">${o.score}</div><div class="g">${o.grade} · ${o.grade_label}</div></div>
+              </div></div>
+            </div>
+          </div>
+          <h2 style="font-size:16px;margin:0 0 8px">五维评分</h2>
+          <div class="scores">
+            <div>${radar(sc)}</div>
+            <div class="bars">${bars}</div>
+          </div>
+          <div class="panel" style="margin-bottom:18px">
+            <h3>全场速度曲线</h3>
+            ${chart(data.series, data.timeline)}
+          </div>
+          <div class="tabs" id="tabs">${data.clips.map((c,i) =>
+            `<button class="tab ${i===0?"on":""}" data-i="${i}" type="button">${esc(c.label)} · ${c.summary.n_swings} 拍 · ${c.scores["综合"]}分</button>`
+          ).join("")}</div>
+          <div id="clip"></div>
+          <p class="note">${(data.caveats || []).map(esc).join(" ")}</p>
+        </article>`;
+      const clipBox = reportEl.querySelector("#clip");
+      const paint = () => {
+        if (!data.clips.length) {
+          clipBox.innerHTML = "<p>没有检出挥拍。</p>";
+          return;
+        }
+        clipBox.innerHTML = renderClip(data.clips[cur]);
+        reportEl.querySelectorAll(".tab").forEach((b) => {
+          b.classList.toggle("on", +b.dataset.i === cur);
+          b.onclick = () => { cur = +b.dataset.i; paint(); };
+        });
+      };
+      paint();
+    }
+  </script>
+</body>
+</html>

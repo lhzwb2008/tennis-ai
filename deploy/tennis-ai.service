@@ -1,0 +1,15 @@
+[Unit]
+Description=Tennis Motion Lab
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tennis-ai
+ExecStart=/opt/tennis-ai/.venv/bin/uvicorn web.app:app --host 0.0.0.0 --port 80
+Restart=always
+RestartSec=4
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/tennis-ai/.env
+
+[Install]
+WantedBy=multi-user.target
