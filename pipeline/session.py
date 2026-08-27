@@ -398,9 +398,9 @@ def analyze_video(
             racket_box=racket_box,
             view=view,
         )
-        summary = summarize(swings, takeback_is_ratio=True)
-        written = score_and_write(stroke, summary, view=view, source="original")
-        all_caveats = written["caveats"]
+        if stroke == "backhand":
+            for sw in swings:
+                sw.shot_kind = "backhand"
 
         needed: dict[int, list] = {}
         for si, sw in enumerate(swings, 1):
@@ -427,7 +427,6 @@ def analyze_video(
         cap.release()
 
         swing_payload = []
-        clip_id = stroke
         labels_zh = {
             "ready": "准备",
             "takeback": "引拍",
@@ -442,7 +441,7 @@ def analyze_video(
                 ("contact", sw.contact_i),
                 ("follow", sw.follow_i),
             ):
-                fname = f"{clip_id}_s{si:02d}_{name}.jpg"
+                fname = f"{stroke}_s{si:02d}_{name}.jpg"
                 abs_path = kf_dir / fname
                 if fi in grabbed:
                     frame, pose = grabbed[fi]
@@ -474,40 +473,70 @@ def analyze_video(
                     "chain_order": sw.chain_order,
                     "racket_speed": None if sw.racket_speed is None else round(sw.racket_speed, 1),
                     "path_lift": sw.path_lift,
+                    "shot_kind": sw.shot_kind,
                     "phases": phases,
                 }
             )
-            timeline.append(
+
+        if stroke == "forehand":
+            grouped = [
+                (
+                    "forehand",
+                    "forehand",
+                    [(sw, pl) for sw, pl in zip(swings, swing_payload) if pl.get("shot_kind") != "slice"],
+                ),
+                (
+                    "forehand_slice",
+                    "forehand_slice",
+                    [(sw, pl) for sw, pl in zip(swings, swing_payload) if pl.get("shot_kind") == "slice"],
+                ),
+            ]
+        else:
+            grouped = [("backhand", "backhand", list(zip(swings, swing_payload)))]
+
+        for clip_id, score_stroke, pairs in grouped:
+            if not pairs:
+                continue
+            sub_swings = [sw for sw, _ in pairs]
+            sub_payload = []
+            for i, (_sw, pl) in enumerate(pairs, 1):
+                item = dict(pl)
+                item["index"] = i
+                sub_payload.append(item)
+            summary = summarize(sub_swings, takeback_is_ratio=True)
+            written = score_and_write(score_stroke, summary, view=view, source="original")
+            all_caveats = written["caveats"]
+            for item in sub_payload:
+                timeline.append(
+                    {
+                        "t": item["contact_t"],
+                        "stroke": clip_id,
+                        "label": written["label"],
+                        "clip_id": clip_id,
+                        "index": item["index"],
+                    }
+                )
+            clips.append(
                 {
-                    "t": round(sw.contact_t, 3),
-                    "stroke": stroke,
+                    "id": clip_id,
                     "label": written["label"],
-                    "clip_id": clip_id,
-                    "index": si,
+                    "stroke": clip_id,
+                    "fps": round(float(fps), 2),
+                    "n_frames": int(len(ts)),
+                    "duration_s": round(float(t_arr[-1]), 2),
+                    "hitting_arm": series.hitting,
+                    "summary": summary,
+                    "scores": written["scores"],
+                    "analysis": {
+                        "strengths": written["strengths"],
+                        "problems": written["problems"],
+                        "drills": written["drills"],
+                        "caveats": written["caveats"],
+                    },
+                    "series": downsample_series(series),
+                    "swings": sub_payload,
                 }
             )
-
-        clips.append(
-            {
-                "id": clip_id,
-                "label": written["label"],
-                "stroke": stroke,
-                "fps": round(float(fps), 2),
-                "n_frames": int(len(ts)),
-                "duration_s": round(float(t_arr[-1]), 2),
-                "hitting_arm": series.hitting,
-                "summary": summary,
-                "scores": written["scores"],
-                "analysis": {
-                    "strengths": written["strengths"],
-                    "problems": written["problems"],
-                    "drills": written["drills"],
-                    "caveats": written["caveats"],
-                },
-                "series": downsample_series(series),
-                "swings": swing_payload,
-            }
-        )
 
     timeline.sort(key=lambda x: x["t"])
 
@@ -595,6 +624,7 @@ def analyze_video(
             "grade_label": grade_label,
             "n_swings": int(overall_n),
             "scores": overall_scores,
+            "shot_mix": {c["id"]: int(c["summary"]["n_swings"]) for c in clips},
         },
         "series": combined_series,
         "timeline": timeline,

@@ -72,7 +72,7 @@ def _phase_filename(info: dict) -> str:
     return ""
 
 
-def _pick_keyframes(clips: list[dict], kf_dir: Path, limit: int = 3) -> list[tuple[str, Path]]:
+def _pick_keyframes(clips: list[dict], kf_dir: Path, limit: int = 4) -> list[tuple[str, Path]]:
     picks: list[tuple[str, Path]] = []
     seen: set[str] = set()
     order = ("contact", "takeback")
@@ -103,11 +103,12 @@ def _slim_report(report: dict) -> dict:
     clips = []
     for c in report.get("clips") or []:
         swings = []
-        for s in (c.get("swings") or [])[:4]:
+        for s in (c.get("swings") or [])[:6]:
             swings.append(
                 {
                     "index": s.get("index"),
                     "contact_t": s.get("contact_t"),
+                    "shot_kind": s.get("shot_kind"),
                     "late_contact": s.get("late_contact"),
                     "contact_forward": s.get("contact_forward"),
                     "cog_stable": s.get("cog_stable"),
@@ -135,6 +136,7 @@ def _slim_report(report: dict) -> dict:
         "duration_s": report.get("duration_s"),
         "detect_rate": report.get("detect_rate"),
         "rule_overall": report.get("overall"),
+        "shot_mix": (report.get("overall") or {}).get("shot_mix") or {},
         "clips": clips,
     }
 
@@ -142,25 +144,38 @@ def _slim_report(report: dict) -> dict:
 def _build_prompt(report: dict, captions: list[str]) -> str:
     payload = json.dumps(_slim_report(report), ensure_ascii=False, indent=2)
     caps = "\n".join(f"- 图片{i+1}: {c}" for i, c in enumerate(captions)) or "（无附图）"
-    return f"""你是网球私教。根据测量数据和附图写点评。不要改文件、不要跑命令、不要读仓库。
+    ids = "、".join(c.get("id") or "" for c in report.get("clips") or []) or "forehand"
+    return f"""你是有执教经验的网球私教，写一份给认真练球的球友看的深度点评。不要改文件、不要跑命令、不要读仓库。
 
-附图（最多 3 张）：
+附图：
 {caps}
 
-四维（不要超过满分）：重心 25（稳且低）、击球点 20（身体侧前方）、动力链 30（髋→肩→臂，伤病关键）、击球效果 25（拍头速度+低向高刷）。
-分数可按画面微调，不要编造没出现的动作。写给普通球友，不要技术词。
-每项 strengths/problems/drills 各写 2 条即可；drills 用「【问题】… → 【原因】… → 【训练】…」。
+【判断动作，不要想当然】
+- shot_mix 和 clips.id 是测量结果。没有 backhand 就不要写反手；正手切削（forehand_slice，path_lift 低或为负）不是反手。
+- 重心要拆开写：偏高（直立挡球）和不稳定（击球时头肩上下晃）可以同时存在，不要只写其中一个。
+- 对照画面说具体现象（哪类球、准备/击球/随挥），不要空泛的「继续努力」。
+
+【四维满分】重心 25、击球点 20、动力链 30、击球效果 25。分数可按画面微调，不要编造没出现的动作。
+
+【写深一点】
+- summary 180–250 字：先点最大亮点，再写两个最要紧的问题，带一点因果。
+- focus：这次练球最该抓的一件事，40 字以内。
+- improvements：3 条可执行训练，写清口令、组数和过关标准。
+- 每个 clip 的 strengths / problems / drills 各 3 条；drills 用「【问题】… → 【原因】… → 【训练】…」。
+- 只点评这些 clip id：{ids}
 
 【测量 JSON】
 {payload}
 
 只输出 JSON：
 {{
-  "summary": "总评，80字以内",
+  "summary": "总评",
+  "focus": "本次最该改的一件事",
+  "improvements": ["【问题】… → 【原因】… → 【训练】…"],
   "scores": {{"综合": 0-100整数, "重心": 0-25, "击球点": 0-20, "动力链": 0-30, "击球效果": 0-25}},
   "clips": [
     {{
-      "id": "forehand 或 backhand，必须与输入 clips.id 对应",
+      "id": "{ids.split('、')[0]}",
       "strengths": ["优点"],
       "problems": ["问题"],
       "drills": ["【问题】… → 【原因】… → 【训练】…"],
@@ -270,6 +285,25 @@ def enrich_with_cursor(report: dict, kf_dir: Path, progress: ProgressCb | None =
         raise RuntimeError("点评结果不完整，请稍后重试")
     report["summary"] = summary.strip()
     coach["summary"] = summary.strip()
+
+    focus = parsed.get("focus")
+    if isinstance(focus, str) and focus.strip():
+        report["focus"] = focus.strip()
+        coach["focus"] = focus.strip()
+
+    improvements = parsed.get("improvements")
+    if isinstance(improvements, list):
+        improvements = [str(x).strip() for x in improvements if str(x).strip()]
+    else:
+        improvements = []
+    if len(improvements) < 2:
+        extra = []
+        for clip in report["clips"]:
+            extra.extend((clip.get("analysis") or {}).get("drills") or [])
+        improvements = (improvements + extra)[:3]
+    if improvements:
+        report["improvements"] = improvements[:4]
+        coach["improvements"] = report["improvements"]
 
     overall_scores = _require_scores(parsed.get("scores"))
     report["overall"]["scores"] = overall_scores

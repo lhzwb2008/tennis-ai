@@ -200,6 +200,8 @@
       background: #fffdf8; border: 1px solid #e6dccb; border-radius: 12px; padding: 14px 16px;
     }
     .panel h3 { margin: 0 0 8px; font-size: 14px; }
+    .improve { margin: 14px 0 18px; }
+    .improve p.focus { margin: 0 0 10px; font-weight: 650; }
     svg.chart { width: 100%; height: 150px; display: block; }
     ul { margin: 0; padding-left: 18px; }
     li { margin: 6px 0; }
@@ -269,7 +271,7 @@
           <button class="btn primary" id="sample" type="button">分析 1 分钟样例</button>
         </div>
         <input id="file" type="file" accept="video/mp4,video/quicktime,video/webm" hidden />
-        <p class="hint">支持 mp4 / mov / webm。样例是侧面训练录像，会分析前 60 秒。</p>
+        <p class="hint">支持 mp4 / mov / webm。样例是侧面训练录像，会分析前 60 秒；分析过一次后再次点击会直接打开报告。</p>
         <div class="pillars">
           <div class="pillar"><b>重心</b>越稳越好，尽量保持低重心</div>
           <div class="pillar"><b>击球点</b>打在身体侧前方，不要贴身偏晚</div>
@@ -343,17 +345,34 @@
       fd.append("stroke", $("stroke").value);
       fd.append("sample", sample ? "1" : "0");
       if (f) fd.append("video", f);
+      if (!sample) {
+        upload.classList.add("hidden");
+        analyzing.classList.remove("hidden");
+        paintSteps(1);
+        $("msg").textContent = "正在提交任务…";
+      }
+      const res = await fetch("api/analyze", { method: "POST", body: fd });
+      if (!res.ok) {
+        const t = await res.text();
+        upload.classList.add("hidden");
+        analyzing.classList.remove("hidden");
+        $("msg").textContent = "提交失败：" + t;
+        $("again").hidden = false;
+        return;
+      }
+      const { job_id, cached } = await res.json();
+      if (cached) {
+        upload.classList.add("hidden");
+        analyzing.classList.add("hidden");
+        const r = await fetch("api/jobs/" + job_id + "/report");
+        const data = await r.json();
+        showReport(data);
+        return;
+      }
       upload.classList.add("hidden");
       analyzing.classList.remove("hidden");
       paintSteps(1);
       $("msg").textContent = "正在提交任务…";
-      const res = await fetch("api/analyze", { method: "POST", body: fd });
-      if (!res.ok) {
-        const t = await res.text();
-        $("msg").textContent = "提交失败：" + t;
-        return;
-      }
-      const { job_id } = await res.json();
       poll(job_id);
     }
 
@@ -432,12 +451,12 @@
       ys.forEach((v, i) => { d += `${i ? "L" : "M"}${nx(xs[i]).toFixed(1)},${ny(v).toFixed(1)} `; });
       const marks = (swings || []).map((s) => {
         const x = nx(s.t != null ? s.t : s.contact_t);
-        const color = s.stroke === "backhand" ? "#c9a24a" : "#1f4a38";
+        const color = s.stroke === "forehand" ? "#1f4a38" : "#c9a24a";
         return `<line x1="${x}" x2="${x}" y1="${pad}" y2="${h - pad}" stroke="${color}" stroke-width="1" opacity="0.75"/>`;
       }).join("");
       return `<svg class="chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${marks}
         <path d="${d}" fill="none" stroke="#1f4a38" stroke-width="1.8"/></svg>
-        <div class="note">绿线为正手，金线为反手</div>`;
+        <div class="note">绿线为正手上旋，金线为切削或反手</div>`;
     }
 
     function contactPill(s) {
@@ -457,8 +476,13 @@
           const name = { ready: "准备", takeback: "引拍", contact: "击球", follow: "随挥" }[k];
           return `<figure><img src="${p.image}" alt="${name}"/><figcaption>${name} · ${p.t.toFixed(2)}s</figcaption></figure>`;
         }).join("");
+        const kind = s.shot_kind === "slice"
+          ? `<span class="pill">正手切削</span>`
+          : s.shot_kind === "backhand"
+            ? `<span class="pill">反手</span>`
+            : `<span class="pill">上旋正手</span>`;
         return `<article class="swing">
-          <div class="barline"><span>挥拍 ${s.index} · ${s.contact_t.toFixed(1)} 秒</span>${seen}${contactPill(s)}</div>
+          <div class="barline"><span>挥拍 ${s.index} · ${s.contact_t.toFixed(1)} 秒</span>${kind}${seen}${contactPill(s)}</div>
           <div class="phases">${figs}</div>
         </article>`;
       }).join("");
@@ -512,6 +536,7 @@
               <p class="meta">${esc(data.source_name)} · ${data.view_label}拍摄 · ${data.handedness_label} · ${data.duration_s} 秒</p>
               <p class="meta">识别到挥拍 ${o.n_swings} 次 · 生成于 ${esc(data.generated_at)}${data.tracking && data.tracking.contact_from_ball ? " · 部分击球已按球和拍定位" : ""}</p>
               ${data.summary ? `<p style="margin:12px 0 0">${esc(data.summary)}</p>` : ""}
+              ${data.focus ? `<p class="focus" style="margin:10px 0 0;font-weight:650">先抓：${esc(data.focus)}</p>` : ""}
               ${data.overlay_video ? `<video class="overlay" src="${data.overlay_video}" controls playsinline style="margin-top:16px"></video>` : ""}
             </div>
             <div>
@@ -526,6 +551,11 @@
             <div>${radar(sc)}</div>
             <div class="bars">${bars}</div>
           </div>
+          ${Array.isArray(data.improvements) && data.improvements.length ? `
+          <div class="panel improve">
+            <h3>改进建议</h3>
+            <ul>${data.improvements.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+          </div>` : ""}
           <div class="panel" style="margin-bottom:18px">
             <h3>全程挥拍节奏</h3>
             ${chart(data.series, data.timeline)}

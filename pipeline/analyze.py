@@ -184,9 +184,10 @@ def classify_swing(
     r_xy = wrist_track(xy_list[lo:hi], conf_list[lo:hi], "r_wrist")
     l_s = float(np.mean(speed_from_xy(l_xy, ts[lo:hi])))
     r_s = float(np.mean(speed_from_xy(r_xy, ts[lo:hi])))
+    # 正手切削时非持拍手也会摆动，阈值过低会被误判成反手。
     if handed == "right":
-        return "backhand" if l_s >= r_s * 0.78 and l_s > 40 else "forehand"
-    return "backhand" if r_s >= l_s * 0.78 and r_s > 40 else "forehand"
+        return "backhand" if l_s > r_s * 1.05 and l_s > 55 else "forehand"
+    return "backhand" if r_s > l_s * 1.05 and r_s > 55 else "forehand"
 
 
 def build_series(
@@ -332,6 +333,7 @@ class SwingMetrics:
     face_vert: float | None
     late_contact: bool
     contact_source: str = "wrist"
+    shot_kind: str = "topspin"
 
 
 def _arr_at(arr: np.ndarray | None, i: int) -> np.ndarray | None:
@@ -514,6 +516,8 @@ def measure_swings(
                 bh = max(1.0, float(box[3] - box[1]))
                 face_vert = float(bh / (bw + bh))
 
+        lift_v = None if path_lift is None else round(path_lift, 3)
+        shot_kind = "slice" if (lift_v is not None and lift_v < 0.08) else "topspin"
         out.append(
             SwingMetrics(
                 contact_i=p,
@@ -531,10 +535,11 @@ def measure_swings(
                 racket_speed=r_speed,
                 contact_forward=None if contact_forward is None else round(contact_forward, 3),
                 chain_order=None if chain_order is None else round(float(chain_order), 3),
-                path_lift=None if path_lift is None else round(path_lift, 3),
+                path_lift=lift_v,
                 face_vert=None if face_vert is None else round(face_vert, 3),
                 late_contact=late,
                 contact_source=source,
+                shot_kind=shot_kind,
             )
         )
     return out
@@ -706,12 +711,12 @@ def score_and_write(
         drills.append(
             "【问题】重心偏高 → 【原因】准备没有屈髋下蹲 → 【训练】无球坐凳准备 8秒×8组，再定点击球要求头肩高度不明显抬起，15球×4组。"
         )
-    elif stable is not None and stable > 0.06:
-        problems.append("重心高度尚可，但击球前后上下起伏偏大，稳定不够。")
+    if stable is not None and stable > 0.06:
+        problems.append("重心不稳定：击球前后上下起伏偏大，不是单纯站得高，而是高低在晃。")
         drills.append(
-            "【问题】重心不稳 → 【原因】击球时起身过早 → 【训练】击球瞬间膝盖保持弯曲，随挥后再站起，15球×3组。"
+            "【问题】重心不稳 → 【原因】击球时起身过早或步点没踩稳 → 【训练】击球瞬间膝盖保持弯曲，随挥后再站起；连续 15 球头肩高度几乎不变才算过关。"
         )
-    else:
+    if not any("重心" in p for p in problems):
         strengths.append("重心高度和稳定性尚可，没有明显直立挡球。")
 
     if (forward is not None and forward < 0.06) or late >= 0.4:
@@ -745,8 +750,15 @@ def score_and_write(
     elif speed >= 260:
         strengths.append("挥拍速度够用，能打出一定质量的球。")
 
-    if lift is not None and lift < 0.08:
-        problems.append("挥拍轨迹太平、偏向下切，旋转会偏少。")
+    if stroke == "forehand_slice":
+        strengths.append("这是正手切削，不是反手；拍头走下切路线。")
+        if lift is not None and lift > 0.12:
+            problems.append("名义上是切削，但轨迹还在往上刷，削不薄、球容易浮。")
+            drills.append(
+                "【问题】切削偏浮 → 【原因】还在用上旋的低向高刷 → 【训练】接触点在身侧前方，拍头由高向低送，15 球擦网不过就算过关。"
+            )
+    elif lift is not None and lift < 0.08:
+        problems.append("挥拍轨迹太平、偏向下切，旋转会偏少。若这是切削，应单独按切削练，不要和上旋正手混在一起评价。")
         drills.append(
             "【问题】旋转不足 → 【原因】击球轨迹没有低向高刷 → 【训练】从膝盖高度刷到肩高，强调拍面稳定、轨迹向上，15球×4组。"
         )
@@ -774,7 +786,12 @@ def score_and_write(
         "旋转根据挥拍轨迹和拍面朝向估计，不是测球的转速。",
     ]
 
-    label = "底线正手" if stroke == "forehand" else "底线反手"
+    if stroke == "forehand_slice":
+        label = "正手切削"
+    elif stroke == "backhand":
+        label = "底线反手"
+    else:
+        label = "底线正手"
     return {
         "label": label,
         "scores": scores,

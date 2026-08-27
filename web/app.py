@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import queue
+import shutil
 import sys
 import threading
 import traceback
@@ -23,12 +25,15 @@ from pipeline.oss import refresh_report_urls
 from pipeline.session import analyze_video, get_detector, get_estimator, json_default
 
 JOBS_DIR = ROOT / "outputs" / "jobs"
+SAMPLE_CACHE_DIR = ROOT / "outputs" / "sample_cache"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 SAMPLE_CANDIDATES = [
     ROOT / "samples" / "demo.mp4",
 ]
+SAMPLE_CACHE_VERSION = "2.1-deep"
 
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
+SAMPLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 _jobs: dict[str, dict] = {}
 _lock = threading.Lock()
@@ -40,6 +45,52 @@ def _sample_path() -> Path | None:
         if p.exists():
             return p
     return None
+
+
+def _sample_fingerprint(src: Path, stroke: str) -> str:
+    st = src.stat()
+    raw = f"{SAMPLE_CACHE_VERSION}|{src.resolve()}|{st.st_mtime_ns}|{st.st_size}|{stroke}|60"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _sample_cache_dir(src: Path, stroke: str) -> Path:
+    return SAMPLE_CACHE_DIR / _sample_fingerprint(src, stroke)
+
+
+def _load_sample_cache(src: Path, stroke: str) -> Path | None:
+    cache = _sample_cache_dir(src, stroke)
+    if (cache / "report.json").is_file():
+        return cache
+    return None
+
+
+def _save_sample_cache(job_id: str, src: Path, stroke: str) -> None:
+    job_dir = JOBS_DIR / job_id
+    report = job_dir / "report.json"
+    if not report.is_file():
+        return
+    cache = _sample_cache_dir(src, stroke)
+    cache.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(report, cache / "report.json")
+    preview = job_dir / "preview.jpg"
+    if preview.is_file():
+        shutil.copy2(preview, cache / "preview.jpg")
+
+
+def _install_sample_cache(job_id: str, cache: Path) -> dict:
+    out = JOBS_DIR / job_id
+    out.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(cache / "report.json", out / "report.json")
+    preview = cache / "preview.jpg"
+    if preview.is_file():
+        shutil.copy2(preview, out / "preview.jpg")
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    overall = report.get("overall") or {}
+    return {
+        "score": overall.get("score"),
+        "n_swings": overall.get("n_swings"),
+        "source_name": report.get("source_name") or "demo.mp4",
+    }
 
 
 def _write_status(job_id: str) -> None:
@@ -89,6 +140,10 @@ def _run_job(job_id: str) -> None:
             score=report["overall"]["score"],
             n_swings=report["overall"]["n_swings"],
         )
+        if job.get("is_sample"):
+            src = _sample_path()
+            if src is not None:
+                _save_sample_cache(job_id, src, str(job.get("stroke_mode") or "auto"))
     except Exception as exc:
         user_msg = str(exc) if isinstance(exc, RuntimeError) else "分析失败，请稍后重试"
         _set(
@@ -168,6 +223,31 @@ async def analyze(
         video_path = src
         source_name = src.name
         max_seconds = 60
+        cache = _load_sample_cache(src, stroke)
+        if cache is not None:
+            meta = _install_sample_cache(job_id, cache)
+            now = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+            with _lock:
+                _jobs[job_id] = {
+                    "id": job_id,
+                    "status": "done",
+                    "step": 5,
+                    "step_name": "教练点评",
+                    "progress": 100,
+                    "message": "分析完成",
+                    "max_seconds": max_seconds,
+                    "stroke_mode": stroke,
+                    "title": title,
+                    "source_name": meta.get("source_name") or source_name,
+                    "score": meta.get("score"),
+                    "n_swings": meta.get("n_swings"),
+                    "cached": True,
+                    "is_sample": True,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                _write_status(job_id)
+            return {"job_id": job_id, "cached": True}
     else:
         if video is None or not video.filename:
             raise HTTPException(400, "请上传视频，或选择使用样例")
@@ -197,6 +277,7 @@ async def analyze(
             "title": title,
             "source_name": source_name,
             "video_path": str(video_path),
+            "is_sample": use_sample,
             "created_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         }
         _write_status(job_id)
