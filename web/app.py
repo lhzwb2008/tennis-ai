@@ -130,7 +130,7 @@ def sample_info():
         raise HTTPException(404, "服务器上还没有样例视频")
     return {
         "name": path.name,
-        "label": "1 分钟背面训练样例",
+        "label": "1 分钟侧面训练样例",
         "exists": True,
     }
 

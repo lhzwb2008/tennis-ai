@@ -46,25 +46,38 @@ def _encode_image(path: Path) -> dict | None:
     }
 
 
+def _phase_filename(info: dict) -> str:
+    raw = str(info.get("oss_key") or info.get("image") or "").split("?", 1)[0]
+    name = Path(raw).name
+    if name.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+        return name
+    return ""
+
+
 def _pick_keyframes(clips: list[dict], kf_dir: Path, limit: int = 5) -> list[tuple[str, Path]]:
     picks: list[tuple[str, Path]] = []
     seen: set[str] = set()
     order = ("contact", "takeback", "ready", "follow")
+    kf_dir = Path(kf_dir)
     for clip in clips:
         for sw in clip.get("swings") or []:
             for phase in order:
                 info = (sw.get("phases") or {}).get(phase) or {}
-                name = Path(str(info.get("image") or info.get("oss_key") or "")).name
+                name = _phase_filename(info)
                 if not name or name in seen:
                     continue
                 path = kf_dir / name
-                if not path.exists():
+                if not path.is_file():
                     continue
                 seen.add(name)
                 label = f"{clip.get('label')} 挥拍#{sw.get('index')} {phase} t={sw.get('contact_t')}"
                 picks.append((label, path))
                 if len(picks) >= limit:
                     return picks
+    if picks:
+        return picks
+    for path in sorted(kf_dir.glob("*.jpg"))[:limit]:
+        picks.append((path.stem, path))
     return picks
 
 
@@ -180,7 +193,7 @@ def enrich_with_cursor(report: dict, kf_dir: Path, progress: ProgressCb | None =
             images.append(enc)
             captions.append(cap)
     if not images:
-        raise RuntimeError("无法生成动作截图，请换一段更清晰的录像再试")
+        raise RuntimeError("动作截图读取失败，请稍后重试")
 
     prompt = _build_prompt(report, captions)
     if progress:
