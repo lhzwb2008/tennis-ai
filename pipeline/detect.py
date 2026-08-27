@@ -59,6 +59,7 @@ class ObjectDetector:
             max_det=20,
             classes=[SPORTS_BALL, TENNIS_RACKET],
             device=self.device,
+            half=self.device == "cuda",
         )
         return [_from_result(r) for r in results]
 
@@ -108,5 +109,8 @@ def draw_objects(bgr: np.ndarray, objs: FrameObjects) -> np.ndarray:
 
 
 def default_detect_path(root: Path) -> str:
-    local = root / "models" / "yolov8s.pt"
-    return str(local) if local.is_file() else "yolov8s.pt"
+    for name in ("yolov8s.pt", "yolov8n.pt"):
+        local = root / "models" / name
+        if local.is_file():
+            return str(local)
+    return "yolov8n.pt"

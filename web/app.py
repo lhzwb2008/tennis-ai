@@ -114,7 +114,7 @@ def _start_worker() -> None:
     t.start()
 
 
-app = FastAPI(title="网球挥拍测评")
+app = FastAPI(title="网球挥拍测评 2.0")
 _start_worker()
 
 
@@ -128,7 +128,7 @@ def health():
         gpu = bool(torch.cuda.is_available())
     except Exception:
         gpu = False
-    return {"ok": True, "sample": bool(sample), "gpu": gpu}
+    return {"ok": True, "sample": bool(sample), "gpu": gpu, "version": "2.0"}
 
 
 @app.get("/api/sample")
@@ -149,7 +149,7 @@ async def analyze(
     sample: str = Form(default="0"),
     max_seconds: float = Form(default=0),
     stroke: str = Form(default="auto"),
-    title: str = Form(default="网球挥拍测评报告"),
+    title: str = Form(default="网球挥拍测评报告 2.0"),
 ):
     if stroke not in ("auto", "forehand", "backhand"):
         stroke = "auto"

@@ -69,6 +69,7 @@ class PoseEstimator:
             conf=0.25,
             max_det=4,
             device=self.device,
+            half=self.device == "cuda",
         )[0]
         return self._from_result(result)
 
@@ -82,6 +83,7 @@ class PoseEstimator:
             conf=0.25,
             max_det=4,
             device=self.device,
+            half=self.device == "cuda",
         )
         return [self._from_result(r) for r in results]
 

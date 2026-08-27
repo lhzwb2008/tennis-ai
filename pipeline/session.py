@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pipeline.analyze import (
+    SCORE_AXES,
     build_series,
     classify_swing,
     detect_peaks,
@@ -246,6 +247,15 @@ def analyze_video(
     obj_list: list = []
     buf: list[np.ndarray] = []
     batch = 4 if getattr(est, "device", "cpu") == "cpu" else 8
+    if getattr(est, "device", "cpu") == "cuda":
+        try:
+            import torch
+
+            # L20-2Q 等 vGPU 只有约 2GB，批量过大容易显存不足
+            if torch.cuda.get_device_properties(0).total_memory < 4 * 1024**3:
+                batch = 2
+        except Exception:
+            batch = 2
     preview_path = out_dir / "preview.jpg"
     i = 0
 
@@ -342,6 +352,7 @@ def analyze_video(
 
     ball_xy = [o.ball_xy if o is not None else None for o in obj_list]
     racket_xy = [o.racket_xy if o is not None else None for o in obj_list]
+    racket_box = [o.racket_box if o is not None else None for o in obj_list]
 
     _emit(
         progress,
@@ -384,6 +395,8 @@ def analyze_video(
             ball_xy=ball_xy,
             racket_xy=racket_xy,
             wrist_xy=hitting_wrist,
+            racket_box=racket_box,
+            view=view,
         )
         summary = summarize(swings, takeback_is_ratio=True)
         written = score_and_write(stroke, summary, view=view, source="original")
@@ -456,6 +469,11 @@ def analyze_video(
                     else round(float(sw.takeback_extent), 3),
                     "late_contact": bool(sw.late_contact),
                     "contact_source": sw.contact_source,
+                    "contact_forward": sw.contact_forward,
+                    "cog_stable": sw.cog_stable,
+                    "chain_order": sw.chain_order,
+                    "racket_speed": None if sw.racket_speed is None else round(sw.racket_speed, 1),
+                    "path_lift": sw.path_lift,
                     "phases": phases,
                 }
             )
@@ -497,20 +515,15 @@ def analyze_video(
         total_swings = sum(c["summary"]["n_swings"] for c in clips)
         weights = [max(c["summary"]["n_swings"], 1) for c in clips]
         overall_scores = {}
-        for key in clips[0]["scores"]:
+        for key, _ in SCORE_AXES:
             overall_scores[key] = int(
                 round(sum(c["scores"][key] * w for c, w in zip(clips, weights)) / sum(weights))
             )
+        overall_scores["综合"] = int(sum(overall_scores[k] for k, _ in SCORE_AXES))
         overall_n = total_swings
     else:
-        overall_scores = {
-            "综合": 0,
-            "重心": 0,
-            "动力链": 0,
-            "动作框架": 0,
-            "步伐": 0,
-            "手腕": 0,
-        }
+        overall_scores = {k: 0 for k, _ in SCORE_AXES}
+        overall_scores["综合"] = 0
         overall_n = 0
         total_swings = 0
 
@@ -545,7 +558,8 @@ def analyze_video(
 
     report = {
         "generated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
-        "title": title or "网球挥拍测评报告",
+        "title": title or "网球挥拍测评报告 2.0",
+        "app_version": "2.0",
         "source_name": video_path.name,
         "view": view,
         "view_label": "背面" if view == "back" else "侧面",

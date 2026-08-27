@@ -1,0 +1,11 @@
+{
+	# 80 仍给 nginx（IP 访问 /tennis-ai/）；证书走 TLS-ALPN（443）
+	http_port 27180
+	https_port 443
+	auto_https disable_redirects
+}
+
+https://tennis.47.93.203.28.sslip.io {
+	encode gzip
+	reverse_proxy 127.0.0.1:27116
+}

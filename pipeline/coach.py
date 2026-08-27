@@ -8,12 +8,12 @@ import re
 from pathlib import Path
 from typing import Callable
 
-from pipeline.analyze import grade_from_score
+from pipeline.analyze import SCORE_AXES, grade_from_score
 from pipeline.cursor_client import available, create_agent, model_id, model_params, run_with_stream
 
 ProgressCb = Callable[[dict], None]
 
-_SCORE_KEYS = ("综合", "重心", "动力链", "动作框架", "步伐", "手腕")
+_SCORE_KEYS = ("综合",) + tuple(k for k, _ in SCORE_AXES)
 
 
 def _extract_json(text: str) -> dict | None:
@@ -96,6 +96,12 @@ def _slim_report(report: dict) -> dict:
                     "stance_ratio": s.get("stance_ratio"),
                     "takeback_ratio": s.get("takeback_ratio"),
                     "late_contact": s.get("late_contact"),
+                    "contact_forward": s.get("contact_forward"),
+                    "cog_stable": s.get("cog_stable"),
+                    "chain_order": s.get("chain_order"),
+                    "racket_speed": s.get("racket_speed"),
+                    "path_lift": s.get("path_lift"),
+                    "contact_source": s.get("contact_source"),
                 }
             )
         clips.append(
@@ -121,15 +127,19 @@ def _slim_report(report: dict) -> dict:
 def _build_prompt(report: dict, captions: list[str]) -> str:
     payload = json.dumps(_slim_report(report), ensure_ascii=False, indent=2)
     caps = "\n".join(f"- 图片{i+1}: {c}" for i, c in enumerate(captions)) or "（无附图）"
-    return f"""你是网球私教。这是一次训练视频测评。
+    return f"""你是网球私教。这是一次训练视频测评（2.0）。
 
 【硬性要求】
 - 不要修改仓库里的任何文件，不要 git commit / 开 PR。
 - 不要打开无关代码。直接根据测量数据和附图给出中文点评。
 - 附图最多 5 张，顺序如下：
 {caps}
-- 测量来自录像画面上的人体关键点：击球帧是手腕速度峰值，可能比真实触球略晚；背面机位无法直接看击球点前后距离和拍面。
-- 下列测量分数只是参考，你可以按画面改分数，但不要编造视频里没有的动作。
+- 评分必须围绕这四件事，它们也是这份测评的核心：
+  1. 重心：越稳越好，同时尽量低重心（准备和击球时屈膝，不要直立挡球）。
+  2. 击球点：应打在整个身体的侧前方，不能贴身、偏晚。能看到球或拍时，以触球画面为准。
+  3. 动力链：髋→腰→肩→肘→腕，身体先动、手臂后到。动力链不合理是伤病的直接来源，也是点评的关键。
+  4. 击球效果：有没有速度、有没有旋转。速度看拍头（或持拍手）挥速；旋转看拍面朝向和挥拍是不是低向高刷。
+- 下列测量分数只是参考，你可以按画面微调分数，但不要编造视频里没有的动作；四项分数不要超过各自满分。
 - 点评写给普通球友，不要出现模型名、算法名、规则引擎、像素、关键点、流水线等技术词。
 - 训练建议用「【问题】… → 【原因】… → 【训练】…」句式。
 
@@ -139,15 +149,15 @@ def _build_prompt(report: dict, captions: list[str]) -> str:
 【输出】
 只输出一个 JSON 对象（不要 markdown 解释），字段：
 {{
-  "summary": "总评，120 字以内",
-  "scores": {{"综合": 0-100整数, "重心": 0-30, "动力链": 0-25, "动作框架": 0-25, "步伐": 0-15, "手腕": 0-5}},
+  "summary": "总评，120 字以内，先点出重心、击球点、动力链、击球效果里最要紧的一两项",
+  "scores": {{"综合": 0-100整数, "重心": 0-25, "击球点": 0-20, "动力链": 0-30, "击球效果": 0-25}},
   "clips": [
     {{
       "id": "forehand 或 backhand，必须与输入 clips.id 对应",
       "strengths": ["优点"],
       "problems": ["问题"],
       "drills": ["【问题】… → 【原因】… → 【训练】…"],
-      "scores": {{"综合": 整数, "重心": 整数, "动力链": 整数, "动作框架": 整数, "步伐": 整数, "手腕": 整数}}
+      "scores": {{"综合": 整数, "重心": 整数, "击球点": 整数, "动力链": 整数, "击球效果": 整数}}
     }}
   ]
 }}
@@ -158,11 +168,12 @@ def _require_scores(src: dict | None) -> dict:
     if not isinstance(src, dict):
         raise RuntimeError("点评结果不完整，请稍后重试")
     out = {}
-    for k in _SCORE_KEYS:
-        v = src.get(k)
+    for key, cap in SCORE_AXES:
+        v = src.get(key)
         if not isinstance(v, (int, float)):
             raise RuntimeError("点评结果不完整，请稍后重试")
-        out[k] = int(round(v))
+        out[key] = int(min(cap, max(0, round(v))))
+    out["综合"] = int(sum(out[k] for k, _ in SCORE_AXES))
     return out
 
 
