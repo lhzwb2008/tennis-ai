@@ -29,7 +29,9 @@ cp .env.example .env
 - `CURSOR_API_KEY`
 - `CURSOR_SANDBOX_REPO_URL`
 - `CURSOR_MODEL_ID`（默认 `grok-4.6`）
-- `CURSOR_MODEL_EFFORT`（默认 `xhigh`）
+- `CURSOR_MODEL_EFFORT`（默认 `high`；点评任务不需要 xhigh）
+- `CURSOR_REUSE_AGENT`（默认 `1`，复用已启动的点评会话）
+- `CURSOR_AGENT_TIMEOUT_MS`（默认 `180000`）
 
 对象存储（与 english-test 相同 bucket / prefix）：
 

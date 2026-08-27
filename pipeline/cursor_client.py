@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -53,7 +54,7 @@ def model_id() -> str:
 
 
 def model_params() -> list[dict[str, str]]:
-    effort = _env("CURSOR_MODEL_EFFORT", "xhigh")
+    effort = _env("CURSOR_MODEL_EFFORT", "high")
     fast = _env("CURSOR_MODEL_FAST", "false")
     return [{"id": "effort", "value": effort}, {"id": "fast", "value": fast}]
 
@@ -263,11 +264,11 @@ def run_with_stream(
     run_id: str,
     *,
     timeout_ms: int | None = None,
-    poll_interval_ms: int = 4000,
+    poll_interval_ms: int = 2000,
     on_assistant: Callable[[str], None] | None = None,
 ) -> tuple[str, str]:
     if timeout_ms is None:
-        timeout_ms = int(_env("CURSOR_AGENT_TIMEOUT_MS", "480000"))
+        timeout_ms = int(_env("CURSOR_AGENT_TIMEOUT_MS", "180000"))
     assistant_buf: list[str] = []
 
     def _on_assistant(delta: str) -> None:
@@ -308,3 +309,96 @@ def run_with_stream(
     sse_thread.join(timeout=2)
     text = final_text or "".join(assistant_buf)
     return text, final_status
+
+
+_reuse_lock = threading.Lock()
+_cached_agent: str | None = None
+_cached_fp: str | None = None
+
+
+def reuse_enabled() -> bool:
+    return _env("CURSOR_REUSE_AGENT", "1").lower() not in ("0", "false", "no")
+
+
+def _fingerprint() -> str:
+    return json.dumps({"model": model_id(), "params": model_params()}, sort_keys=True)
+
+
+def _cache_path() -> Path:
+    return ROOT / "outputs" / ".cursor_agent.json"
+
+
+def _load_cached_agent() -> str | None:
+    global _cached_agent, _cached_fp
+    fp = _fingerprint()
+    if _cached_agent and _cached_fp == fp:
+        return _cached_agent
+    path = _cache_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if data.get("fp") != fp:
+        return None
+    aid = data.get("agent_id")
+    if isinstance(aid, str) and aid.strip():
+        _cached_agent, _cached_fp = aid.strip(), fp
+        return _cached_agent
+    return None
+
+
+def _save_cached_agent(agent_id: str) -> None:
+    global _cached_agent, _cached_fp
+    fp = _fingerprint()
+    _cached_agent, _cached_fp = agent_id, fp
+    path = _cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"agent_id": agent_id, "fp": fp}), encoding="utf-8")
+
+
+def _clear_cached_agent() -> None:
+    global _cached_agent, _cached_fp
+    _cached_agent, _cached_fp = None, None
+    path = _cache_path()
+    if path.exists():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def start_prompt(prompt: str, images: list[dict] | None = None) -> tuple[str, str, bool]:
+    """Start a run, reusing a warm agent when possible. Returns (agent_id, run_id, reused)."""
+    with _reuse_lock:
+        if reuse_enabled():
+            aid = _load_cached_agent()
+            if aid:
+                try:
+                    run_id = create_run(aid, prompt, images)
+                    return aid, run_id, True
+                except Exception as exc:
+                    print(f"[cursor] reuse failed, creating new agent: {exc}", flush=True)
+                    _clear_cached_agent()
+        agent_id, run_id = create_agent(prompt, images)
+        _save_cached_agent(agent_id)
+        return agent_id, run_id, False
+
+
+def warm_agent() -> None:
+    """Boot a sandbox in the background so the first coaching call is not a cold start."""
+    if not available() or not reuse_enabled():
+        return
+    if _load_cached_agent():
+        print("[cursor] reused cached agent", flush=True)
+        return
+    try:
+        print("[cursor] warming agent…", flush=True)
+        agent_id, run_id, _ = start_prompt(
+            "连通性检查。不要修改任何文件，不要运行命令。只回复 {\"ok\":true}。"
+        )
+        run_with_stream(agent_id, run_id)
+        print("[cursor] agent ready", flush=True)
+    except Exception as exc:
+        print(f"[cursor] warm failed: {exc}", flush=True)

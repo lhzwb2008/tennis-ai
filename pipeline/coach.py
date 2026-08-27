@@ -5,11 +5,12 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 from pathlib import Path
 from typing import Callable
 
 from pipeline.analyze import SCORE_AXES, grade_from_score
-from pipeline.cursor_client import available, create_agent, model_id, model_params, run_with_stream
+from pipeline.cursor_client import available, model_id, model_params, run_with_stream, start_prompt
 
 ProgressCb = Callable[[dict], None]
 
@@ -34,11 +35,28 @@ def _extract_json(text: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _encode_image(path: Path) -> dict | None:
+def _encode_image(path: Path, max_side: int = 720) -> dict | None:
     if not path.exists() or path.stat().st_size < 200:
         return None
-    data = path.read_bytes()
-    if len(data) > 12 * 1024 * 1024:
+    try:
+        import cv2
+
+        img = cv2.imread(str(path))
+        if img is None:
+            return None
+        h, w = img.shape[:2]
+        if max(h, w) > max_side:
+            scale = max_side / float(max(h, w))
+            img = cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))))
+        ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 68])
+        if not ok:
+            return None
+        data = buf.tobytes()
+    except Exception:
+        data = path.read_bytes()
+        if len(data) > 2 * 1024 * 1024:
+            return None
+    if len(data) > 2 * 1024 * 1024:
         return None
     return {
         "data": base64.b64encode(data).decode("ascii"),
@@ -54,10 +72,10 @@ def _phase_filename(info: dict) -> str:
     return ""
 
 
-def _pick_keyframes(clips: list[dict], kf_dir: Path, limit: int = 5) -> list[tuple[str, Path]]:
+def _pick_keyframes(clips: list[dict], kf_dir: Path, limit: int = 3) -> list[tuple[str, Path]]:
     picks: list[tuple[str, Path]] = []
     seen: set[str] = set()
-    order = ("contact", "takeback", "ready", "follow")
+    order = ("contact", "takeback")
     kf_dir = Path(kf_dir)
     for clip in clips:
         for sw in clip.get("swings") or []:
@@ -85,22 +103,19 @@ def _slim_report(report: dict) -> dict:
     clips = []
     for c in report.get("clips") or []:
         swings = []
-        for s in (c.get("swings") or [])[:8]:
+        for s in (c.get("swings") or [])[:4]:
             swings.append(
                 {
                     "index": s.get("index"),
                     "contact_t": s.get("contact_t"),
-                    "elbow_deg": s.get("elbow_deg"),
-                    "knee_deg": s.get("knee_deg"),
-                    "cog_ratio": s.get("cog_ratio"),
-                    "stance_ratio": s.get("stance_ratio"),
-                    "takeback_ratio": s.get("takeback_ratio"),
                     "late_contact": s.get("late_contact"),
                     "contact_forward": s.get("contact_forward"),
                     "cog_stable": s.get("cog_stable"),
                     "chain_order": s.get("chain_order"),
                     "racket_speed": s.get("racket_speed"),
                     "path_lift": s.get("path_lift"),
+                    "cog_ratio": s.get("cog_ratio"),
+                    "knee_deg": s.get("knee_deg"),
                     "contact_source": s.get("contact_source"),
                 }
             )
@@ -127,29 +142,21 @@ def _slim_report(report: dict) -> dict:
 def _build_prompt(report: dict, captions: list[str]) -> str:
     payload = json.dumps(_slim_report(report), ensure_ascii=False, indent=2)
     caps = "\n".join(f"- 图片{i+1}: {c}" for i, c in enumerate(captions)) or "（无附图）"
-    return f"""你是网球私教。这是一次训练视频测评（2.0）。
+    return f"""你是网球私教。根据测量数据和附图写点评。不要改文件、不要跑命令、不要读仓库。
 
-【硬性要求】
-- 不要修改仓库里的任何文件，不要 git commit / 开 PR。
-- 不要打开无关代码。直接根据测量数据和附图给出中文点评。
-- 附图最多 5 张，顺序如下：
+附图（最多 3 张）：
 {caps}
-- 评分必须围绕这四件事，它们也是这份测评的核心：
-  1. 重心：越稳越好，同时尽量低重心（准备和击球时屈膝，不要直立挡球）。
-  2. 击球点：应打在整个身体的侧前方，不能贴身、偏晚。能看到球或拍时，以触球画面为准。
-  3. 动力链：髋→腰→肩→肘→腕，身体先动、手臂后到。动力链不合理是伤病的直接来源，也是点评的关键。
-  4. 击球效果：有没有速度、有没有旋转。速度看拍头（或持拍手）挥速；旋转看拍面朝向和挥拍是不是低向高刷。
-- 下列测量分数只是参考，你可以按画面微调分数，但不要编造视频里没有的动作；四项分数不要超过各自满分。
-- 点评写给普通球友，不要出现模型名、算法名、规则引擎、像素、关键点、流水线等技术词。
-- 训练建议用「【问题】… → 【原因】… → 【训练】…」句式。
+
+四维（不要超过满分）：重心 25（稳且低）、击球点 20（身体侧前方）、动力链 30（髋→肩→臂，伤病关键）、击球效果 25（拍头速度+低向高刷）。
+分数可按画面微调，不要编造没出现的动作。写给普通球友，不要技术词。
+每项 strengths/problems/drills 各写 2 条即可；drills 用「【问题】… → 【原因】… → 【训练】…」。
 
 【测量 JSON】
 {payload}
 
-【输出】
-只输出一个 JSON 对象（不要 markdown 解释），字段：
+只输出 JSON：
 {{
-  "summary": "总评，120 字以内，先点出重心、击球点、动力链、击球效果里最要紧的一两项",
+  "summary": "总评，80字以内",
   "scores": {{"综合": 0-100整数, "重心": 0-25, "击球点": 0-20, "动力链": 0-30, "击球效果": 0-25}},
   "clips": [
     {{
@@ -213,12 +220,13 @@ def enrich_with_cursor(report: dict, kf_dir: Path, progress: ProgressCb | None =
                 "step": 5,
                 "step_name": "教练点评",
                 "progress": 90,
-                "message": "正在生成教练点评…",
+                "message": "正在写练习建议…",
             }
         )
 
+    t0 = time.time()
     try:
-        agent_id, run_id = create_agent(prompt, images=images)
+        agent_id, run_id, reused = start_prompt(prompt, images=images)
     except Exception as exc:
         raise RuntimeError("教练点评失败，请稍后重试") from exc
 
@@ -228,16 +236,18 @@ def enrich_with_cursor(report: dict, kf_dir: Path, progress: ProgressCb | None =
         "status": "running",
         "agent_id": agent_id,
         "run_id": run_id,
+        "reused": reused,
     }
     report["coach"] = coach
 
     def _delta(_t: str) -> None:
         if progress:
+            elapsed = time.time() - t0
             progress(
                 {
                     "step": 5,
                     "step_name": "教练点评",
-                    "progress": 93,
+                    "progress": min(95, 90 + int(elapsed / 8)),
                     "message": "正在撰写练习建议…",
                 }
             )
@@ -247,9 +257,12 @@ def enrich_with_cursor(report: dict, kf_dir: Path, progress: ProgressCb | None =
     except Exception as exc:
         raise RuntimeError("教练点评失败，请稍后重试") from exc
 
+    elapsed = time.time() - t0
+    coach["elapsed_s"] = round(elapsed, 1)
     coach["status"] = status
     parsed = _extract_json(text)
-    if status != "FINISHED" or not parsed:
+    print(f"[coach] {status} in {elapsed:.1f}s reused={reused} json={bool(parsed)}", flush=True)
+    if not parsed:
         raise RuntimeError("教练点评未完成，请稍后重试")
 
     summary = parsed.get("summary")

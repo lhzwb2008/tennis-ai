@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from pipeline.cursor_client import warm_agent
 from pipeline.oss import refresh_report_urls
 from pipeline.session import analyze_video, get_detector, get_estimator, json_default
 
@@ -112,6 +113,7 @@ def _worker() -> None:
 def _start_worker() -> None:
     t = threading.Thread(target=_worker, name="analyze-worker", daemon=True)
     t.start()
+    threading.Thread(target=warm_agent, name="cursor-warm", daemon=True).start()
 
 
 app = FastAPI(title="网球挥拍测评 2.0")
