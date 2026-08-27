@@ -242,7 +242,7 @@
       analyzing.classList.remove("hidden");
       paintSteps(1);
       $("msg").textContent = "正在提交任务…";
-      const res = await fetch("/api/analyze", { method: "POST", body: fd });
+      const res = await fetch("api/analyze", { method: "POST", body: fd });
       if (!res.ok) {
         const t = await res.text();
         $("msg").textContent = "提交失败：" + t;
@@ -253,7 +253,7 @@
     }
 
     async function poll(id) {
-      const res = await fetch("/api/jobs/" + id);
+      const res = await fetch("api/jobs/" + id);
       const job = await res.json();
       $("bar").style.width = (job.progress || 0) + "%";
       paintSteps(job.step || 1);
@@ -266,7 +266,7 @@
         $("preview").src = job.preview_url + "?r=" + (job.preview_rev || Date.now());
       }
       if (job.status === "done") {
-        const r = await fetch("/api/jobs/" + id + "/report");
+        const r = await fetch("api/jobs/" + id + "/report");
         const data = await r.json();
         showReport(data);
         return;

@@ -76,7 +76,7 @@ def _run_job(job_id: str) -> None:
             max_seconds=float(job["max_seconds"]),
             stroke_mode=job["stroke_mode"],
             title=job.get("title") or "网球挥拍测评报告",
-            media_url_base=f"/jobs/{job_id}",
+            media_url_base=f"jobs/{job_id}",
             progress=progress,
         )
         _set(
@@ -186,7 +186,7 @@ async def analyze(
             "title": title,
             "source_name": source_name,
             "video_path": str(video_path),
-            "preview_url": f"/jobs/{job_id}/preview.jpg",
+            "preview_url": f"jobs/{job_id}/preview.jpg",
             "created_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         }
         _write_status(job_id)

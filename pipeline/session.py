@@ -234,7 +234,7 @@ def analyze_video(
     conf_list: list[np.ndarray] = []
     ok_flags: list[bool] = []
     buf: list[np.ndarray] = []
-    batch = 8
+    batch = 4 if getattr(est, "device", "cpu") == "cpu" else 8
     preview_path = out_dir / "preview.jpg"
     i = 0
 

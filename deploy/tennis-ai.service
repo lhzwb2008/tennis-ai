@@ -5,11 +5,13 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/tennis-ai
-ExecStart=/opt/tennis-ai/.venv/bin/uvicorn web.app:app --host 0.0.0.0 --port 80
+ExecStart=/opt/tennis-ai/.venv/bin/uvicorn web.app:app --host 127.0.0.1 --port 8766
 Restart=always
 RestartSec=4
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=/opt/tennis-ai/.env
+Environment=OMP_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+EnvironmentFile=-/opt/tennis-ai/.env
 
 [Install]
 WantedBy=multi-user.target
