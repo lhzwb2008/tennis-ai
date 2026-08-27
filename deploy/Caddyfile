@@ -7,5 +7,10 @@
 
 https://tennis.47.93.203.28.sslip.io {
 	encode gzip
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
 	reverse_proxy 127.0.0.1:27116
 }
