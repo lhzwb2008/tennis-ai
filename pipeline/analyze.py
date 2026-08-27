@@ -288,6 +288,45 @@ class SwingMetrics:
     takeback_extent: float | None
     wrist_speed: float | None
     late_contact: bool
+    contact_source: str = "wrist"
+
+
+def refine_contact_index(
+    peak_i: int,
+    fps: float,
+    ball_xy: list,
+    racket_xy: list,
+    wrist_xy: np.ndarray | None = None,
+    max_dist: float = 140.0,
+) -> tuple[int, str]:
+    """Move the hit frame to where the ball is closest to the racket (or wrist)."""
+    n = len(ball_xy)
+    if n == 0:
+        return peak_i, "wrist"
+    lo = max(0, peak_i - int(0.10 * fps))
+    hi = min(n - 1, peak_i + int(0.42 * fps))
+    best: tuple[float, int, str] | None = None
+    for i in range(lo, hi + 1):
+        b = ball_xy[i]
+        r = racket_xy[i] if i < len(racket_xy) else None
+        w = None
+        if wrist_xy is not None and i < len(wrist_xy) and np.isfinite(wrist_xy[i]).all():
+            w = wrist_xy[i]
+        if b is None:
+            continue
+        if r is not None:
+            d = float(np.linalg.norm(b - r))
+            src = "ball_racket"
+        elif w is not None:
+            d = float(np.linalg.norm(b - w))
+            src = "ball_wrist"
+        else:
+            continue
+        if best is None or d < best[0]:
+            best = (d, i, src)
+    if best is None or best[0] > max_dist:
+        return peak_i, "wrist"
+    return best[1], best[2]
 
 
 def measure_swings(
@@ -295,11 +334,19 @@ def measure_swings(
     fps: float,
     peaks: list[int] | None = None,
     enable_late_contact: bool = True,
+    ball_xy: list | None = None,
+    racket_xy: list | None = None,
+    wrist_xy: np.ndarray | None = None,
 ) -> list[SwingMetrics]:
     peaks = detect_swings(series) if peaks is None else peaks
     out: list[SwingMetrics] = []
     n = len(series.t)
     for p in peaks:
+        source = "wrist"
+        if ball_xy is not None:
+            p, source = refine_contact_index(
+                p, fps, ball_xy, racket_xy or [None] * len(ball_xy), wrist_xy=wrist_xy
+            )
         pre = max(0, p - int(0.55 * fps))
         ready = max(0, p - int(0.40 * fps))
         follow = min(n - 1, p + int(0.28 * fps))
@@ -330,6 +377,7 @@ def measure_swings(
                 takeback_extent=_val_at(series.takeback, takeback_i, pre, p, "max"),
                 wrist_speed=_val_at(series.wrist_speed, p, p, p + 1, "at"),
                 late_contact=late,
+                contact_source=source,
             )
         )
     return out
@@ -493,6 +541,7 @@ def score_and_write(
         "本报告根据训练录像自动生成，仅供练习参考，不能替代现场教练。",
         "拍摄角度会影响判断：背面录像较难看清击球点前后位置和拍面开合。",
         "评分来自画面，距离和角度会有一定误差。",
+        "能看到球或球拍时，击球画面按球和拍的距离选取；看不到时仍按挥拍动作估计。",
     ]
 
     label = "底线正手" if stroke == "forehand" else "底线反手"

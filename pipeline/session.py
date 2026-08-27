@@ -32,6 +32,7 @@ from pipeline.analyze import (
     wrist_track,
 )
 from pipeline.coach import enrich_with_cursor
+from pipeline.detect import ObjectDetector, default_detect_path, draw_objects
 from pipeline.oss import object_key, require_configured, upload_file
 from pipeline.pose import PoseEstimator, draw_pose
 
@@ -70,6 +71,7 @@ def _fix_backview_laterality(xy_list, conf_list, view: str):
 ProgressCb = Callable[[dict], None]
 
 _EST: PoseEstimator | None = None
+_DET: ObjectDetector | None = None
 
 
 def json_default(o):
@@ -86,6 +88,14 @@ def get_estimator(model_path: str | None = None) -> PoseEstimator:
             path = "yolov8n-pose.pt"
         _EST = PoseEstimator(path)
     return _EST
+
+
+def get_detector(model_path: str | None = None) -> ObjectDetector:
+    global _DET
+    if _DET is None:
+        path = model_path or default_detect_path(ROOT)
+        _DET = ObjectDetector(path)
+    return _DET
 
 
 def downsample_series(series, every: int = 4) -> dict:
@@ -151,8 +161,10 @@ def _draw_hud(frame: np.ndarray, t: float, ok: bool, _done: int, _total: int) ->
     return out
 
 
-def _save_phase(path: Path, view, pose, tag: str) -> None:
+def _save_phase(path: Path, view, pose, tag: str, objs=None) -> None:
     vis = draw_pose(view, pose)
+    if objs is not None:
+        vis = draw_objects(vis, objs)
     h, w = vis.shape[:2]
     scale = 560 / max(w, 1)
     vis = cv2.resize(vis, (560, int(h * scale)))
@@ -211,6 +223,7 @@ def analyze_video(
     target = max(1, max_frames)
 
     est = estimator or get_estimator()
+    det = get_detector()
     _emit(
         progress,
         step=2,
@@ -230,6 +243,7 @@ def analyze_video(
     xy_list: list[np.ndarray] = []
     conf_list: list[np.ndarray] = []
     ok_flags: list[bool] = []
+    obj_list: list = []
     buf: list[np.ndarray] = []
     batch = 4 if getattr(est, "device", "cpu") == "cpu" else 8
     preview_path = out_dir / "preview.jpg"
@@ -255,12 +269,15 @@ def analyze_video(
         if not buf:
             return
         poses = est.infer_batch(buf)
-        for frame, pose in zip(buf, poses):
-            vis = _draw_hud(draw_pose(frame, pose), i / fps, pose.ok, i + 1, target)
+        objects = det.infer_batch(buf)
+        for frame, pose, objs in zip(buf, poses, objects):
+            vis = draw_objects(draw_pose(frame, pose), objs)
+            vis = _draw_hud(vis, i / fps, pose.ok, i + 1, target)
             writer.write(vis)
             xy_list.append(pose.xy)
             conf_list.append(pose.conf)
             ok_flags.append(bool(pose.ok))
+            obj_list.append(objs)
             ts.append(i / fps)
             if (i % 18) == 0:
                 cv2.imwrite(str(preview_path), vis, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
@@ -323,6 +340,9 @@ def analyze_video(
         else:
             labels.append(classify_swing(xy_list, conf_list, t_arr, p, handed, fps))
 
+    ball_xy = [o.ball_xy if o is not None else None for o in obj_list]
+    racket_xy = [o.racket_xy if o is not None else None for o in obj_list]
+
     _emit(
         progress,
         step=4,
@@ -351,8 +371,19 @@ def analyze_video(
             hitting=handed if stroke == "forehand" else ("left" if handed == "right" else "right"),
         )
         dummy_series = series
+        hitting_wrist = wrist_track(
+            xy_list,
+            conf_list,
+            "r_wrist" if series.hitting == "right" else "l_wrist",
+        )
         swings = measure_swings(
-            series, fps, peaks=stroke_peaks, enable_late_contact=enable_late
+            series,
+            fps,
+            peaks=stroke_peaks,
+            enable_late_contact=enable_late,
+            ball_xy=ball_xy,
+            racket_xy=racket_xy,
+            wrist_xy=hitting_wrist,
         )
         summary = summarize(swings, takeback_is_ratio=True)
         written = score_and_write(stroke, summary, view=view, source="original")
@@ -402,7 +433,8 @@ def analyze_video(
                 abs_path = kf_dir / fname
                 if fi in grabbed:
                     frame, pose = grabbed[fi]
-                    _save_phase(abs_path, frame, pose, labels_zh[name])
+                    objs = obj_list[fi] if fi < len(obj_list) else None
+                    _save_phase(abs_path, frame, pose, labels_zh[name], objs=objs)
                 if not abs_path.is_file():
                     raise RuntimeError("动作截图生成失败，请换一段更清晰的录像再试")
                 published = _publish(job_id, f"keyframes/{fname}", abs_path)
@@ -423,6 +455,7 @@ def analyze_video(
                     if sw.takeback_extent is None
                     else round(float(sw.takeback_extent), 3),
                     "late_contact": bool(sw.late_contact),
+                    "contact_source": sw.contact_source,
                     "phases": phases,
                 }
             )
@@ -524,6 +557,18 @@ def analyze_video(
         "detect_rate": round(detect_rate, 3),
         "max_seconds": max_seconds,
         "stroke_mode": stroke_mode,
+        "tracking": {
+            "ball_frames": int(sum(1 for b in ball_xy if b is not None)),
+            "racket_frames": int(sum(1 for r in racket_xy if r is not None)),
+            "contact_from_ball": int(
+                sum(
+                    1
+                    for c in clips
+                    for s in c.get("swings") or []
+                    if s.get("contact_source") in ("ball_racket", "ball_wrist")
+                )
+            ),
+        },
         "overlay_video": overlay_pub["url"],
         "overlay_oss_key": overlay_pub["key"],
         "cover_image": cover_pub["url"],

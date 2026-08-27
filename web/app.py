@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pipeline.oss import refresh_report_urls
-from pipeline.session import analyze_video, get_estimator, json_default
+from pipeline.session import analyze_video, get_detector, get_estimator, json_default
 
 JOBS_DIR = ROOT / "outputs" / "jobs"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -100,6 +100,7 @@ def _run_job(job_id: str) -> None:
 
 def _worker() -> None:
     get_estimator()
+    get_detector()
     while True:
         job_id = _queue.get()
         try:
@@ -120,7 +121,14 @@ _start_worker()
 @app.get("/api/health")
 def health():
     sample = _sample_path()
-    return {"ok": True, "sample": bool(sample)}
+    gpu = False
+    try:
+        import torch
+
+        gpu = bool(torch.cuda.is_available())
+    except Exception:
+        gpu = False
+    return {"ok": True, "sample": bool(sample), "gpu": gpu}
 
 
 @app.get("/api/sample")

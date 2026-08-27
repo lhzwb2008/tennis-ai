@@ -339,6 +339,9 @@
       const sc = clip.scores;
       const a = clip.analysis;
       const swings = clip.swings.map((s) => {
+        const seen = (s.contact_source === "ball_racket" || s.contact_source === "ball_wrist")
+          ? `<span class="pill ok">已看到球</span>`
+          : "";
         const late = s.late_contact
           ? `<span class="pill bad">击球偏晚倾向</span>`
           : `<span class="pill ok">击球时机正常</span>`;
@@ -348,7 +351,7 @@
           return `<figure><img src="${p.image}" alt="${name}"/><figcaption>${name} · ${p.t.toFixed(2)}s</figcaption></figure>`;
         }).join("");
         return `<article class="swing">
-          <div class="barline"><span>挥拍 ${s.index} · ${s.contact_t.toFixed(1)} 秒</span>${late}</div>
+          <div class="barline"><span>挥拍 ${s.index} · ${s.contact_t.toFixed(1)} 秒</span>${seen}${late}</div>
           <div class="phases">${figs}</div>
         </article>`;
       }).join("");
@@ -397,7 +400,7 @@
               <div class="kicker">挥拍测评报告</div>
               <h1>${esc(data.title)}</h1>
               <p class="meta">${esc(data.source_name)} · ${data.view_label}拍摄 · ${data.handedness_label} · ${data.duration_s} 秒</p>
-              <p class="meta">识别到挥拍 ${o.n_swings} 次 · 生成于 ${esc(data.generated_at)}</p>
+              <p class="meta">识别到挥拍 ${o.n_swings} 次 · 生成于 ${esc(data.generated_at)}${data.tracking && data.tracking.contact_from_ball ? " · 部分击球已按球和拍定位" : ""}</p>
               ${data.summary ? `<p style="margin:12px 0 0">${esc(data.summary)}</p>` : ""}
               ${data.overlay_video ? `<video class="overlay" src="${data.overlay_video}" controls playsinline style="margin-top:16px"></video>` : ""}
             </div>
