@@ -181,6 +181,14 @@
     .score-ring .n { font-size: 42px; font-weight: 700; line-height: 1; }
     .score-ring .g { font-size: 12px; color: #8a7040; letter-spacing: .12em; }
     .axis-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 8px 0 22px; }
+    .speed-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 8px 0 8px; }
+    .speed {
+      background: #fffdf8; border: 1px solid #e6dccb; border-radius: 14px; padding: 12px 14px;
+    }
+    .speed .lab { font-size: 12px; color: var(--ink-muted); }
+    .speed .val { font-size: 22px; font-weight: 700; margin: 4px 0 0; letter-spacing: -.03em; }
+    .speed .val .unit { font-size: 12px; font-weight: 600; color: var(--ink-muted); margin-left: 4px; }
+    .speed-note { color: var(--ink-muted); font-size: 12px; margin: 0 0 22px; }
     .axis {
       background: #fffdf8; border: 1px solid #e6dccb; border-radius: 14px; padding: 12px 14px;
     }
@@ -232,13 +240,13 @@
     .hidden { display: none !important; }
     video.overlay { width: 100%; border-radius: 12px; background: #000; max-height: 360px; }
     @media (max-width: 860px) {
-      .cover, .scores, .grid2, .live, .steps, .phases, .pillars, .axis-grid { grid-template-columns: 1fr 1fr; }
+      .cover, .scores, .grid2, .live, .steps, .phases, .pillars, .axis-grid, .speed-grid { grid-template-columns: 1fr 1fr; }
       .paper { padding: 22px 16px 32px; }
       header.hero { flex-direction: column; align-items: flex-start; }
       .steps { grid-template-columns: 1fr 1fr; }
     }
     @media (max-width: 560px) {
-      .pillars, .axis-grid, .phases { grid-template-columns: 1fr; }
+      .pillars, .axis-grid, .phases, .speed-grid { grid-template-columns: 1fr; }
     }
     @media print {
       body { background: white; }
@@ -282,7 +290,7 @@
           <div class="pillar"><b>重心</b>越稳越好，尽量保持低重心</div>
           <div class="pillar"><b>击球点</b>胸口高度、持拍侧稍外、身前约 45°</div>
           <div class="pillar"><b>动力链</b>身体先动、手臂后到，避免伤病</div>
-          <div class="pillar"><b>击球效果</b>看拍头速度，以及旋转轨迹</div>
+          <div class="pillar"><b>击球效果</b>看拍头速度（画面估算）和旋转轨迹</div>
         </div>
       </div>
     </section>
@@ -501,6 +509,49 @@
         <div class="note">绿线为正手上旋，金线为切削或反手</div>`;
     }
 
+    function fmtKmh(v) {
+      if (v == null || v === "") return "";
+      const n = Number(v);
+      if (!Number.isFinite(n)) return "";
+      return n >= 20 ? String(Math.round(n)) : n.toFixed(1);
+    }
+
+    function speedCell(lab, v) {
+      const n = fmtKmh(v);
+      const val = n ? `${n}<span class="unit"> km/h</span>` : "—";
+      return `<div class="speed"><div class="lab">${lab}</div><div class="val">${val}</div></div>`;
+    }
+
+    function speedPanel(speeds, title) {
+      if (!speeds) return "";
+      const keys = ["swing_kmh", "wrist_kmh", "hip_kmh", "ball_in_kmh", "ball_out_kmh"];
+      if (!keys.some((k) => speeds[k] != null)) return "";
+      const swingLab = speeds.swing_from === "wrist" ? "拍头·腕推算" : "拍头";
+      const maxNote = fmtKmh(speeds.swing_kmh_max);
+      return `
+        <h2 style="font-size:16px;margin:0 0 8px">${title || "速度估计"}</h2>
+        <div class="speed-grid">
+          ${speedCell(swingLab, speeds.swing_kmh)}
+          ${speedCell("手腕", speeds.wrist_kmh)}
+          ${speedCell("转髋", speeds.hip_kmh)}
+          ${speedCell("来球", speeds.ball_in_kmh)}
+          ${speedCell("出球", speeds.ball_out_kmh)}
+        </div>
+        <p class="speed-note">按身高或拍长把画面位移换成公里每小时，不是测速雷达。侧面更准，正面会偏慢。${maxNote ? "最快一拍拍头约 " + maxNote + " km/h。" : ""}</p>`;
+    }
+
+    function speedPills(s) {
+      const sp = s.speeds || {};
+      const pills = [];
+      const swing = fmtKmh(sp.swing_kmh);
+      const out = fmtKmh(sp.ball_out_kmh);
+      const hip = fmtKmh(sp.hip_kmh);
+      if (swing) pills.push(`<span class="pill ok">拍头 ${swing} km/h</span>`);
+      if (out) pills.push(`<span class="pill">出球 ${out} km/h</span>`);
+      if (hip) pills.push(`<span class="pill">转髋 ${hip} km/h</span>`);
+      return pills.join("");
+    }
+
     function contactPill(s) {
       const hp = s.hit_point;
       if (hp && hp.summary) {
@@ -543,7 +594,7 @@
             ? `<span class="pill">反手</span>`
             : `<span class="pill">上旋正手</span>`;
         return `<article class="swing">
-          <div class="barline"><span>挥拍 ${s.index} · ${s.contact_t.toFixed(1)} 秒</span>${kind}${seen}${contactPill(s)}</div>
+          <div class="barline"><span>挥拍 ${s.index} · ${s.contact_t.toFixed(1)} 秒</span>${kind}${seen}${contactPill(s)}${speedPills(s)}</div>
           <div class="phases">${figs}</div>
           ${hitNotes(s)}
         </article>`;
@@ -611,6 +662,7 @@
           </div>
           <h2 style="font-size:16px;margin:0 0 8px">四维评分</h2>
           <div class="axis-grid">${tiles}</div>
+          ${speedPanel(o.speeds, "速度估计")}
           <div class="scores">
             <div>${radar(sc)}</div>
             <div class="bars">${bars}</div>

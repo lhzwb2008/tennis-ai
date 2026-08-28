@@ -34,6 +34,7 @@ from pipeline.analyze import (
 )
 from pipeline.coach import enrich_with_cursor
 from pipeline.contact import draw_hit_point, interpolate_xy
+from pipeline.speed import mean_speeds
 from pipeline.detect import (
     ObjectDetector,
     bind_ball_to_player,
@@ -607,6 +608,7 @@ def analyze_video(
                 "racket_speed": None if sw.racket_speed is None else round(sw.racket_speed, 1),
                 "path_lift": sw.path_lift,
                 "shot_kind": sw.shot_kind,
+                "speeds": sw.speeds,
                 "phases": phases,
             }
             if sw.hit_point is not None:
@@ -785,6 +787,9 @@ def analyze_video(
             "n_swings": int(overall_n),
             "scores": overall_scores,
             "shot_mix": {c["id"]: int(c["summary"]["n_swings"]) for c in clips},
+            "speeds": mean_speeds(
+                [s.get("speeds") or {} for c in clips for s in (c.get("swings") or [])]
+            ),
         },
         "series": combined_series,
         "timeline": timeline,

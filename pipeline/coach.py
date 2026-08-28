@@ -115,6 +115,7 @@ def _slim_report(report: dict) -> dict:
                     "cog_stable": s.get("cog_stable"),
                     "chain_order": s.get("chain_order"),
                     "racket_speed": s.get("racket_speed"),
+                    "speeds": s.get("speeds"),
                     "path_lift": s.get("path_lift"),
                     "cog_ratio": s.get("cog_ratio"),
                     "knee_deg": s.get("knee_deg"),
@@ -159,6 +160,7 @@ def _build_prompt(report: dict, captions: list[str]) -> str:
 - 准备时对准来球的是前肩（右手持拍是左肩），不是前手。禁止写「左手指向来球」当优点。
 - 击球瞬间不能双脚同时离地（后脚脚尖点地可以）。随挥过肩之后才能上步。
 - 用短句、大白话。少用「动力链」「加载」这种词，改成「腰先转、手后到」「先蹲再打」。
+- speeds 里的 *_kmh 是画面比例估算（拍头、手腕、转髋、来球、出球），单位公里每小时。可以写「拍头大约 xx」，不要写成测速雷达，不要和职业球员雷达数据硬比。没有数字就不要编。
 
 【四维满分】重心 25、击球点 20、动力链 30、击球效果 25。分数可按画面微调，不要编造没出现的动作。
 

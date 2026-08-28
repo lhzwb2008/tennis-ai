@@ -8,6 +8,16 @@ import numpy as np
 
 from pipeline.contact import HitPoint, measure_hit_point, refine_contact_index, score_hit_point
 from pipeline.pose import KPT
+from pipeline.speed import (
+    ball_track_xy,
+    estimate_kmh,
+    flight_speed_px,
+    mean_speeds,
+    median_m_per_px,
+    peak_speed_px,
+    racket_head_track,
+    track_to_xy,
+)
 
 # 2.0 四维评分（合计 100）
 SCORE_AXES = (
@@ -336,6 +346,7 @@ class SwingMetrics:
     contact_source: str = "wrist"
     shot_kind: str = "topspin"
     hit_point: HitPoint | None = None
+    speeds: dict | None = None
 
 
 def _arr_at(arr: np.ndarray | None, i: int) -> np.ndarray | None:
@@ -377,6 +388,15 @@ def measure_swings(
     out: list[SwingMetrics] = []
     n = len(series.t)
     hitting = series.hitting
+    wrist_src = wrist_xy if wrist_xy is not None else series.wrist_xy
+    wrist_track_xy = track_to_xy(wrist_src, n)
+    hip_track_xy = track_to_xy(series.hip_xy, n)
+    head_track = racket_head_track(racket_box, wrist_src, n)
+    racket_track = track_to_xy(racket_xy, n) if racket_xy is not None else None
+    ball_track = ball_track_xy(ball_xy, n)
+    r_spd = None
+    if racket_track is not None and int(np.isfinite(racket_track).all(axis=1).sum()) >= 3:
+        r_spd = speed_from_xy(racket_track, series.t)
 
     def _pose_at(i: int):
         if pose_xy is None or pose_conf is None or i < 0 or i >= len(pose_xy):
@@ -488,15 +508,38 @@ def measure_swings(
                 chain_order = min(chain_order, 0.35)
 
         r_speed = None
-        if racket_xy:
-            r_track = np.vstack(
-                [
-                    np.array(r, dtype=np.float64) if r is not None else np.array([np.nan, np.nan])
-                    for r in racket_xy
-                ]
-            )
-            r_spd = speed_from_xy(r_track, series.t)
+        if r_spd is not None:
             r_speed = _val_at(r_spd, p, max(0, p - 1), min(n, p + 2), "max")
+
+        spd_lo = max(takeback_i, p - int(0.18 * fps))
+        spd_hi = min(n, p + int(0.10 * fps) + 1)
+        scale_lo = max(0, takeback_i)
+        scale_hi = min(n, p + max(2, int(0.08 * fps)))
+        m_per_px = median_m_per_px(
+            pose_xy,
+            pose_conf,
+            series.torso_len,
+            racket_box,
+            wrist_src,
+            scale_lo,
+            scale_hi,
+            torso,
+        )
+        racket_peak = peak_speed_px(head_track, series.t, spd_lo, spd_hi)
+        if racket_peak is None and racket_track is not None:
+            racket_peak = peak_speed_px(racket_track, series.t, spd_lo, spd_hi)
+        in_lo = max(0, p - int(0.22 * fps))
+        in_hi = max(in_lo + 2, p - 1)
+        out_lo = min(n, p + 2)
+        out_hi = min(n, p + int(0.28 * fps) + 1)
+        speeds = estimate_kmh(
+            m_per_px=m_per_px,
+            wrist_px=peak_speed_px(wrist_track_xy, series.t, spd_lo, spd_hi),
+            racket_px=racket_peak,
+            hip_px=peak_speed_px(hip_track_xy, series.t, takeback_i, min(n, p + 2)),
+            ball_in_px=None if ball_track is None else flight_speed_px(ball_track, series.t, in_lo, in_hi),
+            ball_out_px=None if ball_track is None else flight_speed_px(ball_track, series.t, out_lo, out_hi),
+        )
 
         path_lift = None
         src_xy = series.wrist_xy
@@ -551,6 +594,7 @@ def measure_swings(
                 contact_source=source,
                 shot_kind=shot_kind,
                 hit_point=hit_pt,
+                speeds=speeds,
             )
         )
     return out
@@ -581,6 +625,8 @@ def summarize(swings: list[SwingMetrics], takeback_is_ratio: bool = False) -> di
         "late_contact_rate": float(
             round(sum(1 for s in swings if s.late_contact) / max(len(swings), 1), 2)
         ),
+        "speeds": mean_speeds([s.speeds for s in swings if s.speeds]),
+        "swing_kmh": None,
         "hit_height": _mean_hit(swings, "height"),
         "hit_side": _mean_hit(swings, "side"),
         "shoulder_aim": _mean_hit(swings, "shoulder_aim"),
@@ -603,6 +649,7 @@ def summarize(swings: list[SwingMetrics], takeback_is_ratio: bool = False) -> di
             )
         ),
     }
+    out["swing_kmh"] = (out.get("speeds") or {}).get("swing_kmh")
     return out
 
 
@@ -810,13 +857,21 @@ def score_and_write(
     elif chain is not None and chain >= 0.75:
         strengths.append("发力顺序比较合理：身体先动，手臂后到。")
 
+    kmh = summary.get("swing_kmh")
+    kmh_note = "" if kmh is None else f"（拍头大约 {kmh:.0f} km/h，画面估算）"
     if speed < 180:
-        problems.append("拍头速度偏慢，击球威胁不够。")
+        problems.append(f"拍头速度偏慢，击球威胁不够。{kmh_note}")
         drills.append(
             "【问题】球速偏慢 → 【原因】没有用上腿和转体，或击球点太晚只能挡 → 【训练】先把击球点打到身前，再练自抛自打把拍头抽起来，20球×3组。"
         )
     elif speed >= 260:
-        strengths.append("挥拍速度够用，能打出一定质量的球。")
+        strengths.append(f"挥拍速度够用，能打出一定质量的球。{kmh_note}")
+    elif kmh is not None:
+        strengths.append(f"拍头大约 {kmh:.0f} km/h（按画面估算，不是测速枪）。")
+
+    ball_out = (summary.get("speeds") or {}).get("ball_out_kmh")
+    if ball_out is not None and ball_out >= 25:
+        strengths.append(f"出球大约 {ball_out:.0f} km/h（画面估算）。")
 
     if stroke == "forehand_slice":
         strengths.append("这是正手切削，不是反手；拍头走下切路线。")
@@ -853,6 +908,7 @@ def score_and_write(
         "能看到球或球拍时，击球画面按球和拍的距离选取。挥拍附近会再放大球员区域检测一次，并标出相对身体的击球点（实心圈）和理想区（虚线圈）。",
         "理想击球点：胸口高度、持拍一侧稍外侧、身前大约 45°。不判断球打在拍面哪里。单路录像看不到真实 3D，高度和左右/前后会受拍摄角度影响。",
         "旋转根据挥拍轨迹和拍面朝向估计，不是测球的转速。",
+        "拍头、手腕、转髋和球速按画面里人体/球拍长度换算，是估算不是测速枪。侧面更接近真实，正面或斜切会偏慢。",
     ]
 
     if stroke == "forehand_slice":
