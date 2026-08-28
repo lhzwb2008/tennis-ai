@@ -33,9 +33,10 @@ from pipeline.analyze import (
     wrist_track,
 )
 from pipeline.coach import enrich_with_cursor
+from pipeline.contact import draw_hit_point, interpolate_xy
 from pipeline.detect import ObjectDetector, default_detect_path, draw_objects
 from pipeline.oss import object_key, require_configured, upload_file
-from pipeline.pose import PoseEstimator, draw_pose
+from pipeline.pose import FramePose, PoseEstimator, draw_pose
 
 LR_PAIRS = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16)]
 
@@ -162,18 +163,72 @@ def _draw_hud(frame: np.ndarray, t: float, ok: bool, _done: int, _total: int) ->
     return out
 
 
-def _save_phase(path: Path, view, pose, tag: str, objs=None) -> None:
+def _save_phase(path: Path, view, pose, tag: str, objs=None, hit=None) -> None:
     vis = draw_pose(view, pose)
     if objs is not None:
         vis = draw_objects(vis, objs)
+    if hit is not None or tag:
+        vis = draw_hit_point(vis, hit, tag=tag, emphasize=hit is not None)
     h, w = vis.shape[:2]
     scale = 560 / max(w, 1)
     vis = cv2.resize(vis, (560, int(h * scale)))
-    cv2.putText(
-        vis, tag, (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA
-    )
     path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(path), vis, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+
+
+def _write_overlay(
+    video_path: Path,
+    overlay_path: Path,
+    preview_path: Path,
+    job_id: str,
+    fps: float,
+    width: int,
+    height: int,
+    target: int,
+    xy_list,
+    conf_list,
+    ok_flags,
+    obj_list,
+    contact_hits: dict,
+) -> tuple[dict, dict]:
+    fd, tmp_name = tempfile.mkstemp(suffix=".mp4")
+    os.close(fd)
+    raw_path = Path(tmp_name)
+    writer = cv2.VideoWriter(str(raw_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    cap = cv2.VideoCapture(str(video_path))
+    idx = 0
+    while idx < target:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        pose = FramePose(
+            xy_list[idx] if idx < len(xy_list) else np.zeros((17, 2)),
+            conf_list[idx] if idx < len(conf_list) else np.zeros(17),
+            bool(ok_flags[idx]) if idx < len(ok_flags) else False,
+        )
+        objs = obj_list[idx] if idx < len(obj_list) else None
+        vis = draw_objects(draw_pose(frame, pose), objs)
+        if idx in contact_hits:
+            vis = draw_hit_point(vis, contact_hits[idx], tag="击球", emphasize=True)
+        vis = _draw_hud(vis, idx / fps, pose.ok, idx + 1, target)
+        writer.write(vis)
+        if idx in contact_hits or (idx % 24 == 0):
+            cv2.imwrite(str(preview_path), vis, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
+        idx += 1
+    cap.release()
+    writer.release()
+    _encode_h264(raw_path, overlay_path)
+    try:
+        raw_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    if not overlay_path.is_file():
+        raise RuntimeError("无法生成回放，请换一段录像再试")
+    if not preview_path.is_file():
+        raise RuntimeError("无法生成预览，请换一段录像再试")
+    overlay_pub = _publish(job_id, "overlay.mp4", overlay_path)
+    preview_pub = _publish(job_id, "preview.jpg", preview_path)
+    return overlay_pub, preview_pub
 
 
 def _publish(job_id: str, rel: str, path: Path) -> dict:
@@ -233,13 +288,8 @@ def analyze_video(
         message="正在识别球员动作…",
     )
 
-    fd, tmp_name = tempfile.mkstemp(suffix=".mp4")
-    os.close(fd)
-    raw_path = Path(tmp_name)
-    writer = cv2.VideoWriter(
-        str(raw_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
-    )
-
+    est = estimator or get_estimator()
+    det = get_detector()
     ts: list[float] = []
     xy_list: list[np.ndarray] = []
     conf_list: list[np.ndarray] = []
@@ -283,7 +333,6 @@ def analyze_video(
         for frame, pose, objs in zip(buf, poses, objects):
             vis = draw_objects(draw_pose(frame, pose), objs)
             vis = _draw_hud(vis, i / fps, pose.ok, i + 1, target)
-            writer.write(vis)
             xy_list.append(pose.xy)
             conf_list.append(pose.conf)
             ok_flags.append(bool(pose.ok))
@@ -311,19 +360,6 @@ def analyze_video(
             flush()
     flush()
     cap.release()
-    writer.release()
-
-    overlay_path = out_dir / "overlay.mp4"
-    _emit(progress, step=2, step_name="识别动作", progress=72, message="正在生成回放…")
-    _encode_h264(raw_path, overlay_path)
-    overlay_pub = _publish(job_id, "overlay.mp4", overlay_path)
-    if not preview_path.is_file():
-        raise RuntimeError("无法生成预览，请换一段录像再试")
-    preview_pub = _publish(job_id, "preview.jpg", preview_path)
-    try:
-        raw_path.unlink(missing_ok=True)
-    except OSError:
-        pass
 
     if not ts:
         raise RuntimeError("这段视频没有可用画面，请换一段再试")
@@ -350,7 +386,7 @@ def analyze_video(
         else:
             labels.append(classify_swing(xy_list, conf_list, t_arr, p, handed, fps))
 
-    ball_xy = [o.ball_xy if o is not None else None for o in obj_list]
+    ball_xy = interpolate_xy([o.ball_xy if o is not None else None for o in obj_list])
     racket_xy = [o.racket_xy if o is not None else None for o in obj_list]
     racket_box = [o.racket_box if o is not None else None for o in obj_list]
 
@@ -366,6 +402,7 @@ def analyze_video(
     timeline = []
     all_caveats: list[str] = []
     dummy_series = None
+    contact_hits: dict[int, object] = {}
 
     for stroke in ("forehand", "backhand"):
         stroke_peaks = [p for p, lab in zip(peaks, labels) if lab == stroke]
@@ -397,22 +434,21 @@ def analyze_video(
             wrist_xy=hitting_wrist,
             racket_box=racket_box,
             view=view,
+            pose_xy=xy_list,
+            pose_conf=conf_list,
         )
         if stroke == "backhand":
             for sw in swings:
                 sw.shot_kind = "backhand"
+        for sw in swings:
+            if sw.hit_point is not None:
+                contact_hits[int(sw.contact_i)] = sw.hit_point
 
-        needed: dict[int, list] = {}
-        for si, sw in enumerate(swings, 1):
-            for name, fi in (
-                ("ready", sw.ready_i),
-                ("takeback", sw.takeback_i),
-                ("contact", sw.contact_i),
-                ("follow", sw.follow_i),
-            ):
-                needed.setdefault(fi, []).append((si, name))
+        needed: set[int] = set()
+        for sw in swings:
+            needed.update((sw.ready_i, sw.takeback_i, sw.contact_i, sw.follow_i))
 
-        grabbed: dict[int, tuple] = {}
+        grabbed: dict[int, np.ndarray] = {}
         cap = cv2.VideoCapture(str(video_path))
         idx = 0
         while True:
@@ -420,7 +456,7 @@ def analyze_video(
             if not ok or idx >= target:
                 break
             if idx in needed:
-                grabbed[idx] = (frame, est.infer(frame))
+                grabbed[idx] = frame
                 if len(grabbed) == len(needed):
                     break
             idx += 1
@@ -443,10 +479,11 @@ def analyze_video(
             ):
                 fname = f"{stroke}_s{si:02d}_{name}.jpg"
                 abs_path = kf_dir / fname
-                if fi in grabbed:
-                    frame, pose = grabbed[fi]
+                if fi in grabbed and fi < len(xy_list):
+                    pose = FramePose(xy_list[fi], conf_list[fi], bool(ok_flags[fi] if fi < len(ok_flags) else True))
                     objs = obj_list[fi] if fi < len(obj_list) else None
-                    _save_phase(abs_path, frame, pose, labels_zh[name], objs=objs)
+                    hit = sw.hit_point if name == "contact" else None
+                    _save_phase(abs_path, grabbed[fi], pose, labels_zh[name], objs=objs, hit=hit)
                 if not abs_path.is_file():
                     raise RuntimeError("动作截图生成失败，请换一段更清晰的录像再试")
                 published = _publish(job_id, f"keyframes/{fname}", abs_path)
@@ -455,28 +492,29 @@ def analyze_video(
                     "image": published["url"],
                     "oss_key": published["key"],
                 }
-            swing_payload.append(
-                {
-                    "index": si,
-                    "contact_t": round(sw.contact_t, 3),
-                    "elbow_deg": None if sw.elbow_contact is None else round(sw.elbow_contact, 1),
-                    "knee_deg": None if sw.knee_contact is None else round(sw.knee_contact, 1),
-                    "cog_ratio": None if sw.cog_ready is None else round(sw.cog_ready, 3),
-                    "stance_ratio": None if sw.stance_ready is None else round(sw.stance_ready, 3),
-                    "takeback_ratio": None
-                    if sw.takeback_extent is None
-                    else round(float(sw.takeback_extent), 3),
-                    "late_contact": bool(sw.late_contact),
-                    "contact_source": sw.contact_source,
-                    "contact_forward": sw.contact_forward,
-                    "cog_stable": sw.cog_stable,
-                    "chain_order": sw.chain_order,
-                    "racket_speed": None if sw.racket_speed is None else round(sw.racket_speed, 1),
-                    "path_lift": sw.path_lift,
-                    "shot_kind": sw.shot_kind,
-                    "phases": phases,
-                }
-            )
+            payload = {
+                "index": si,
+                "contact_t": round(sw.contact_t, 3),
+                "elbow_deg": None if sw.elbow_contact is None else round(sw.elbow_contact, 1),
+                "knee_deg": None if sw.knee_contact is None else round(sw.knee_contact, 1),
+                "cog_ratio": None if sw.cog_ready is None else round(sw.cog_ready, 3),
+                "stance_ratio": None if sw.stance_ready is None else round(sw.stance_ready, 3),
+                "takeback_ratio": None
+                if sw.takeback_extent is None
+                else round(float(sw.takeback_extent), 3),
+                "late_contact": bool(sw.late_contact),
+                "contact_source": sw.contact_source,
+                "contact_forward": sw.contact_forward,
+                "cog_stable": sw.cog_stable,
+                "chain_order": sw.chain_order,
+                "racket_speed": None if sw.racket_speed is None else round(sw.racket_speed, 1),
+                "path_lift": sw.path_lift,
+                "shot_kind": sw.shot_kind,
+                "phases": phases,
+            }
+            if sw.hit_point is not None:
+                payload["hit_point"] = sw.hit_point.as_dict()
+            swing_payload.append(payload)
 
         if stroke == "forehand":
             grouped = [
@@ -504,7 +542,13 @@ def analyze_video(
                 item["index"] = i
                 sub_payload.append(item)
             summary = summarize(sub_swings, takeback_is_ratio=True)
-            written = score_and_write(score_stroke, summary, view=view, source="original")
+            written = score_and_write(
+                score_stroke,
+                summary,
+                view=view,
+                source="original",
+                hits=[sw.hit_point for sw in sub_swings if sw.hit_point is not None],
+            )
             all_caveats = written["caveats"]
             for item in sub_payload:
                 timeline.append(
@@ -555,6 +599,24 @@ def analyze_video(
         overall_scores["综合"] = 0
         overall_n = 0
         total_swings = 0
+
+    overlay_path = out_dir / "overlay.mp4"
+    _emit(progress, step=4, step_name="整理数据", progress=86, message="正在生成回放，并标出击球点…")
+    overlay_pub, preview_pub = _write_overlay(
+        video_path,
+        overlay_path,
+        preview_path,
+        job_id,
+        fps,
+        width,
+        height,
+        target,
+        xy_list,
+        conf_list,
+        ok_flags,
+        obj_list,
+        contact_hits,
+    )
 
     grade, grade_label = grade_from_score(int(overall_scores["综合"]))
 
@@ -608,7 +670,7 @@ def analyze_video(
                     1
                     for c in clips
                     for s in c.get("swings") or []
-                    if s.get("contact_source") in ("ball_racket", "ball_wrist")
+                    if s.get("contact_source") in ("ball_racket", "ball_wrist", "ball")
                 )
             ),
         },

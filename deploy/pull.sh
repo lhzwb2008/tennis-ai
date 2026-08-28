@@ -5,6 +5,7 @@ set -euo pipefail
 cd /opt/tennis-ai
 git fetch origin
 git pull --ff-only origin main
+.venv/bin/pip install -q -r requirements.txt
 systemctl restart tennis-ai
 sleep 2
 systemctl is-active tennis-ai

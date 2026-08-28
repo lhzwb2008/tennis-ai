@@ -223,6 +223,10 @@
     .pill { font-size: 11px; border: 1px solid #d9d0c0; border-radius: 999px; padding: 2px 8px; }
     .pill.bad { color: #a33; border-color: #e8b4b4; }
     .pill.ok { color: #1f4a38; border-color: #b7d4c4; }
+    .hit-meta { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 10px; }
+    .legend { font-size: 12px; color: var(--ink-muted); margin: 8px 0 0; }
+    .legend b { color: #c23; }
+    .legend i { color: #1aa; font-style: normal; font-weight: 650; }
     .actions { display: flex; gap: 8px; justify-content: flex-end; margin: 0 0 16px; }
     .note { color: var(--ink-muted); font-size: 12px; margin-top: 22px; }
     .hidden { display: none !important; }
@@ -275,7 +279,7 @@
         <p class="hint">支持 mp4 / mov / webm。样例是侧面训练录像，会分析前 60 秒；分析过一次后再次点击会直接打开报告。</p>
         <div class="pillars">
           <div class="pillar"><b>重心</b>越稳越好，尽量保持低重心</div>
-          <div class="pillar"><b>击球点</b>打在身体侧前方，不要贴身偏晚</div>
+          <div class="pillar"><b>击球点</b>胸口高度、持拍侧稍外、身前约 45°</div>
           <div class="pillar"><b>动力链</b>身体先动、手臂后到，避免伤病</div>
           <div class="pillar"><b>击球效果</b>看拍头速度，以及旋转轨迹</div>
         </div>
@@ -493,15 +497,35 @@
     }
 
     function contactPill(s) {
+      const hp = s.hit_point;
+      if (hp && hp.summary) {
+        const cls = hp.ok ? "ok" : "bad";
+        return `<span class="pill ${cls}">${esc(hp.summary)}</span>`;
+      }
       if (s.late_contact) return `<span class="pill bad">击球偏晚贴身</span>`;
       if (s.contact_forward != null && s.contact_forward >= 0.1) return `<span class="pill ok">击球点在侧前方</span>`;
       return `<span class="pill ok">击球时机正常</span>`;
     }
 
+    function hitNotes(s) {
+      const hp = s.hit_point;
+      if (!hp) return "";
+      const pills = [];
+      if (hp.height_label) pills.push(`<span class="pill">高度 · ${esc(hp.height_label)}</span>`);
+      if (hp.side_label && hp.side_label.indexOf("看不清") < 0) pills.push(`<span class="pill">左右 · ${esc(hp.side_label)}</span>`);
+      if (hp.forward_label && hp.forward_label.indexOf("看不清") < 0) pills.push(`<span class="pill">前后 · ${esc(hp.forward_label)}</span>`);
+      if (hp.sweet_label && hp.sweet_label.indexOf("看不清") < 0) pills.push(`<span class="pill">${esc(hp.sweet_label)}</span>`);
+      if (hp.hand_reaches) pills.push(`<span class="pill bad">左肩应对准来球，不是左手</span>`);
+      if (hp.both_feet_off) pills.push(`<span class="pill bad">双脚同时离地</span>`);
+      if (hp.early_step) pills.push(`<span class="pill bad">随挥过肩后再上步</span>`);
+      if (!pills.length) return "";
+      return `<div class="hit-meta">${pills.join("")}</div>`;
+    }
+
     function renderClip(clip) {
       const a = clip.analysis;
       const swings = clip.swings.map((s) => {
-        const seen = (s.contact_source === "ball_racket" || s.contact_source === "ball_wrist")
+        const seen = (s.contact_source === "ball_racket" || s.contact_source === "ball_wrist" || (s.hit_point && s.hit_point.source === "ball"))
           ? `<span class="pill ok">已看到球</span>`
           : "";
         const figs = ["ready", "takeback", "contact", "follow"].map((k) => {
@@ -517,6 +541,7 @@
         return `<article class="swing">
           <div class="barline"><span>挥拍 ${s.index} · ${s.contact_t.toFixed(1)} 秒</span>${kind}${seen}${contactPill(s)}</div>
           <div class="phases">${figs}</div>
+          ${hitNotes(s)}
         </article>`;
       }).join("");
       return `
@@ -537,7 +562,8 @@
           <h3>训练建议</h3>
           <ul>${a.drills.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
         </div>
-        <div class="swings">${swings}</div>`;
+        <div class="swings">${swings}</div>
+        <p class="legend">击球画面里：<b>实心十字</b>是实际击球点（球碰到拍的位置），<i>虚线圈</i>是理想区（胸口高度、持拍侧稍外、身前约 45°）。</p>`;
     }
 
     function showReport(data) {

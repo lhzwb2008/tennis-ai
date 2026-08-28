@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from pipeline.contact import HitPoint, measure_hit_point, refine_contact_index, score_hit_point
 from pipeline.pose import KPT
 
 # 2.0 四维评分（合计 100）
@@ -334,6 +335,7 @@ class SwingMetrics:
     late_contact: bool
     contact_source: str = "wrist"
     shot_kind: str = "topspin"
+    hit_point: HitPoint | None = None
 
 
 def _arr_at(arr: np.ndarray | None, i: int) -> np.ndarray | None:
@@ -358,44 +360,6 @@ def _peak_index(arr: np.ndarray | None, lo: int, hi: int) -> int | None:
     return lo + int(np.argmax(filled))
 
 
-def refine_contact_index(
-    peak_i: int,
-    fps: float,
-    ball_xy: list,
-    racket_xy: list,
-    wrist_xy: np.ndarray | None = None,
-    max_dist: float = 140.0,
-) -> tuple[int, str]:
-    """Move the hit frame to where the ball is closest to the racket (or wrist)."""
-    n = len(ball_xy)
-    if n == 0:
-        return peak_i, "wrist"
-    lo = max(0, peak_i - int(0.10 * fps))
-    hi = min(n - 1, peak_i + int(0.42 * fps))
-    best: tuple[float, int, str] | None = None
-    for i in range(lo, hi + 1):
-        b = ball_xy[i]
-        r = racket_xy[i] if i < len(racket_xy) else None
-        w = None
-        if wrist_xy is not None and i < len(wrist_xy) and np.isfinite(wrist_xy[i]).all():
-            w = wrist_xy[i]
-        if b is None:
-            continue
-        if r is not None:
-            d = float(np.linalg.norm(b - r))
-            src = "ball_racket"
-        elif w is not None:
-            d = float(np.linalg.norm(b - w))
-            src = "ball_wrist"
-        else:
-            continue
-        if best is None or d < best[0]:
-            best = (d, i, src)
-    if best is None or best[0] > max_dist:
-        return peak_i, "wrist"
-    return best[1], best[2]
-
-
 def measure_swings(
     series: ClipSeries,
     fps: float,
@@ -406,16 +370,34 @@ def measure_swings(
     wrist_xy: np.ndarray | None = None,
     racket_box: list | None = None,
     view: str = "side",
+    pose_xy: list | None = None,
+    pose_conf: list | None = None,
 ) -> list[SwingMetrics]:
     peaks = detect_swings(series) if peaks is None else peaks
     out: list[SwingMetrics] = []
     n = len(series.t)
     hitting = series.hitting
+
+    def _pose_at(i: int):
+        if pose_xy is None or pose_conf is None or i < 0 or i >= len(pose_xy):
+            return None, None
+        return pose_xy[i], pose_conf[i]
+
+    def _ball_at(i: int):
+        if ball_xy is None or i < 0 or i >= len(ball_xy):
+            return None
+        return ball_xy[i]
+
     for p in peaks:
         source = "wrist"
         if ball_xy is not None:
             p, source = refine_contact_index(
-                p, fps, ball_xy, racket_xy or [None] * len(ball_xy), wrist_xy=wrist_xy
+                p,
+                fps,
+                ball_xy,
+                racket_xy or [None] * len(ball_xy),
+                wrist_xy=wrist_xy,
+                racket_box=racket_box,
             )
         pre = max(0, p - int(0.55 * fps))
         ready = max(0, p - int(0.40 * fps))
@@ -430,31 +412,59 @@ def measure_swings(
         if torso is None or torso < 1:
             torso = 160.0
 
-        hip = _arr_at(series.hip_xy, p)
-        contact_pt = None
-        if racket_xy is not None and p < len(racket_xy) and racket_xy[p] is not None:
-            cand = np.asarray(racket_xy[p], dtype=np.float64)
-            if np.isfinite(cand).all():
-                contact_pt = cand
-        if contact_pt is None:
-            contact_pt = _arr_at(series.wrist_xy, p)
-        if contact_pt is None and wrist_xy is not None:
-            contact_pt = _arr_at(wrist_xy, p)
-
         load_x = _val_at(series.reach_x, takeback_i, takeback_i, takeback_i + 1, "at") if series.reach_x is not None else None
         load_sign = 1.0 if (load_x is None or load_x >= 0) else -1.0
-        contact_forward = None
-        if hip is not None and contact_pt is not None:
-            offset_x = float(contact_pt[0] - hip[0])
-            if view == "back":
-                side = 1.0 if hitting == "right" else -1.0
-                contact_forward = float(side * offset_x / torso)
-            else:
-                contact_forward = float(-offset_x * load_sign / torso)
+
+        xy_c, cf_c = _pose_at(p)
+        xy_tb, cf_tb = _pose_at(takeback_i)
+        xy_rd, cf_rd = _pose_at(ready)
+        xy_fl, cf_fl = _pose_at(follow)
+        w_at = _arr_at(wrist_xy if wrist_xy is not None else series.wrist_xy, p)
+        box_at = racket_box[p] if racket_box is not None and p < len(racket_box) else None
+        r_at = racket_xy[p] if racket_xy is not None and p < len(racket_xy) else None
+        hit_pt = None
+        if xy_c is not None:
+            hit_pt = measure_hit_point(
+                xy_c,
+                cf_c,
+                _ball_at(p),
+                box_at,
+                r_at,
+                w_at,
+                hitting,
+                view,
+                load_sign=load_sign,
+                ball_takeback=_ball_at(takeback_i),
+                pose_takeback=xy_tb,
+                conf_takeback=cf_tb,
+                pose_ready=xy_rd,
+                conf_ready=cf_rd,
+                pose_follow=xy_fl,
+                conf_follow=cf_fl,
+                enable_forward=enable_late_contact,
+            )
+            if hit_pt.source in ("ball",) and source == "wrist":
+                source = "ball_wrist"
+
+        contact_forward = hit_pt.forward if hit_pt is not None else None
+        if contact_forward is None and view == "back" and hit_pt is not None:
+            contact_forward = hit_pt.side
+        if contact_forward is None:
+            hip = _arr_at(series.hip_xy, p)
+            contact_pt = _arr_at(series.wrist_xy, p)
+            if hip is not None and contact_pt is not None:
+                offset_x = float(contact_pt[0] - hip[0])
+                if view == "back":
+                    side = 1.0 if hitting == "right" else -1.0
+                    contact_forward = float(side * offset_x / torso)
+                else:
+                    contact_forward = float(-offset_x * load_sign / torso)
 
         late = False
         if enable_late_contact and contact_forward is not None:
             late = contact_forward < 0.04
+        if hit_pt is not None and view == "side" and hit_pt.forward is not None:
+            late = hit_pt.forward < 0.04
 
         cog_win = series.cog_ratio[ready:p + 1]
         cog_finite = cog_win[np.isfinite(cog_win)]
@@ -540,6 +550,7 @@ def measure_swings(
                 late_contact=late,
                 contact_source=source,
                 shot_kind=shot_kind,
+                hit_point=hit_pt,
             )
         )
     return out
@@ -570,8 +581,41 @@ def summarize(swings: list[SwingMetrics], takeback_is_ratio: bool = False) -> di
         "late_contact_rate": float(
             round(sum(1 for s in swings if s.late_contact) / max(len(swings), 1), 2)
         ),
+        "hit_height": _mean_hit(swings, "height"),
+        "hit_side": _mean_hit(swings, "side"),
+        "hit_sweet": _mean_hit(swings, "sweet"),
+        "shoulder_aim": _mean_hit(swings, "shoulder_aim"),
+        "hand_reaches_rate": float(
+            round(
+                sum(1 for s in swings if s.hit_point and s.hit_point.hand_reaches) / max(len(swings), 1),
+                2,
+            )
+        ),
+        "both_feet_off_rate": float(
+            round(
+                sum(1 for s in swings if s.hit_point and s.hit_point.both_feet_off) / max(len(swings), 1),
+                2,
+            )
+        ),
+        "early_step_rate": float(
+            round(
+                sum(1 for s in swings if s.hit_point and s.hit_point.early_step) / max(len(swings), 1),
+                2,
+            )
+        ),
     }
     return out
+
+
+def _mean_hit(swings: list[SwingMetrics], key: str):
+    xs = []
+    for s in swings:
+        if s.hit_point is None:
+            continue
+        v = getattr(s.hit_point, key, None)
+        if v is not None:
+            xs.append(float(v))
+    return None if not xs else round(float(np.mean(xs)), 3)
 
 
 def _takeback_tier(summary: dict) -> str:
@@ -596,6 +640,7 @@ def score_and_write(
     *,
     view: str = "side",
     source: str = "overlay",
+    hits: list | None = None,
 ) -> dict:
     """Map measured stats to 2.0 four-axis scores + coaching text."""
     n = summary["n_swings"] or 1
@@ -612,6 +657,10 @@ def score_and_write(
     face = summary.get("face_vert")
     tb_tier = _takeback_tier(summary)
     ratio = summary.get("takeback_ratio")
+    hand_rate = summary.get("hand_reaches_rate") or 0
+    feet_rate = summary.get("both_feet_off_rate") or 0
+    step_rate = summary.get("early_step_rate") or 0
+    height = summary.get("hit_height")
 
     # 重心 25：越低越好 + 越稳越好
     height_pts = float(np.clip(16 - (cog - 0.47) * 90, 4, 16))
@@ -626,23 +675,21 @@ def score_and_write(
         stab_pts = 6.0
     else:
         stab_pts = float(np.clip(9 - stable * 80, 2, 9))
+    if feet_rate >= 0.35:
+        stab_pts = min(stab_pts, 4)
     cog_score = int(np.clip(round(height_pts + stab_pts), 6, 25))
 
-    # 击球点 20：应在身体侧前方，不能贴身偏晚
-    if forward is None:
+    # 击球点 20：胸口高度 + 持拍侧稍外 / 身前约 45°
+    if hits:
+        contact_pts = score_hit_point(hits, view, late)
+    elif forward is None:
         contact_pts = 11.0 if late < 0.4 else 7.0
     elif 0.10 <= forward <= 0.42:
         contact_pts = 18.0
     elif 0.04 <= forward < 0.10 or 0.42 < forward <= 0.55:
         contact_pts = 14.0
-    elif forward > 0.55:
-        contact_pts = 11.0
     else:
-        contact_pts = 7.0
-    if late >= 0.45:
-        contact_pts = min(contact_pts, 9)
-    elif late >= 0.25:
-        contact_pts = min(contact_pts, 13)
+        contact_pts = 7.0 if late >= 0.4 else 11.0
     contact_score = int(np.clip(round(contact_pts), 4, 20))
 
     # 动力链 30：髋→肩→肘→腕；甩胳膊会直接扣分（伤病来源）
@@ -721,13 +768,35 @@ def score_and_write(
 
     if (forward is not None and forward < 0.06) or late >= 0.4:
         problems.append(
-            f"击球点容易偏晚、贴在身体旁边，没有打在身体侧前方（约 {int(late*100)}% 的挥拍有此倾向）。"
+            f"击球点容易偏晚、贴在身体旁边。理想位置是胸口高度、持拍一侧稍外侧、身前大约 45°（约 {int(late*100)}% 的挥拍偏晚）。"
         )
         drills.append(
-            "【问题】击球点偏晚 → 【原因】引拍完成晚、启动慢 → 【训练】球过网时必须完成引拍；前脚前方放标志物，必须在标志物前击球，15球×4组。"
+            "【问题】击球点偏晚 → 【原因】引拍完成晚、人没先到位 → 【训练】球过网时必须完成引拍；在前脚斜前方约 45°、胸口高度放一个标志，必须在标志处击球，15球×4组。"
         )
     elif forward is not None and 0.10 <= forward <= 0.42:
-        strengths.append("击球点总体在身体侧前方，没有明显挤在身上。")
+        strengths.append("击球点总体在身前，没有明显挤在身上。")
+    if height is not None and height < -0.16:
+        problems.append("击球点偏低，球在胸口以下才碰到，人容易被带着弯腰捞球。")
+        drills.append(
+            "【问题】击球点偏低 → 【原因】等球掉下来才打 → 【训练】自抛自打，规定必须在胸口高度碰到球，低于胸口算失误，20球×3组。"
+        )
+    elif height is not None and height > 0.18:
+        problems.append("击球点偏高，接近肩膀以上，拍面不好压，容易打飞。")
+    if hand_rate >= 0.3:
+        problems.append("准备时左手伸去够球了。对准来球的应该是左肩，不是左手。")
+        drills.append(
+            "【问题】左手去够球 → 【原因】没转肩，用手去找球 → 【训练】引拍时左肩对准来球，左手只做平衡；对着镜子看左肩而不是左手，15次×3组。"
+        )
+    if feet_rate >= 0.25:
+        problems.append("击球时双脚有同时离地。后脚可以脚尖点地，但不能两脚一起跳起来。")
+        drills.append(
+            "【问题】击球跳起来 → 【原因】发力靠蹦，不是蹬转 → 【训练】击球瞬间前脚踩死，后脚只允许脚尖点地；录下来检查脚踝，15球×3组。"
+        )
+    if step_rate >= 0.25:
+        problems.append("上步早了：随挥还没过肩，人已经迈出去。应先把拍随挥过肩，再上步。")
+        drills.append(
+            "【问题】过早上步 → 【原因】急着去够下一拍 → 【训练】击球后先让拍从头上绕过对侧肩，落地停一拍再上步，12球×3组。"
+        )
 
     if chain is not None and chain < 0.55:
         problems.append("动力链更像手臂主导：腕或肘先发力，髋肩没有先转，这是伤病高发模式。")
@@ -782,7 +851,8 @@ def score_and_write(
         "本报告根据训练录像自动生成，仅供练习参考，不能替代现场教练。",
         "拍摄角度会影响判断：背面录像较难看清击球点前后位置和拍面开合。",
         "评分来自画面，距离和角度会有一定误差。",
-        "能看到球或球拍时，击球画面按球和拍的距离选取；看不到时仍按挥拍动作估计。",
+        "能看到球或球拍时，击球画面按球和拍头的距离选取，并标出实际击球点（实心圈）和理想区（虚线圈）。",
+        "理想击球点：胸口高度、持拍一侧稍外侧、身前大约 45°。单路录像看不到真实 3D，高度和左右/前后会受拍摄角度影响。",
         "旋转根据挥拍轨迹和拍面朝向估计，不是测球的转速。",
     ]
 

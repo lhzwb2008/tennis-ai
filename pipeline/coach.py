@@ -111,6 +111,7 @@ def _slim_report(report: dict) -> dict:
                     "shot_kind": s.get("shot_kind"),
                     "late_contact": s.get("late_contact"),
                     "contact_forward": s.get("contact_forward"),
+                    "hit_point": s.get("hit_point"),
                     "cog_stable": s.get("cog_stable"),
                     "chain_order": s.get("chain_order"),
                     "racket_speed": s.get("racket_speed"),
@@ -154,11 +155,15 @@ def _build_prompt(report: dict, captions: list[str]) -> str:
 - shot_mix 和 clips.id 是测量结果。没有 backhand 就不要写反手；正手切削（forehand_slice，path_lift 低或为负）不是反手。
 - 重心要拆开写：偏高（直立挡球）和不稳定（击球时头肩上下晃）可以同时存在，不要只写其中一个。
 - 对照画面说具体现象（哪类球、准备/击球/随挥），不要空泛的「继续努力」。
+- 击球点看 hit_point：理想是胸口高度、持拍一侧稍外侧、身前大约 45°。用「高了/低了、偏左/偏右、偏前/偏晚」说话，不要只写「击球点不好」。
+- 准备时对准来球的是前肩（右手持拍是左肩），不是前手。禁止写「左手指向来球」当优点。
+- 击球瞬间不能双脚同时离地（后脚脚尖点地可以）。随挥过肩之后才能上步。
+- 用短句、大白话。少用「动力链」「加载」这种词，改成「腰先转、手后到」「先蹲再打」。
 
 【四维满分】重心 25、击球点 20、动力链 30、击球效果 25。分数可按画面微调，不要编造没出现的动作。
 
 【写深一点】
-- summary 180–250 字：先点最大亮点，再写两个最要紧的问题，带一点因果。
+- summary 160–220 字：先点最大亮点，再写两个最要紧的问题，带一点因果。句子要短，球友扫一眼就能懂。
 - focus：这次练球最该抓的一件事，40 字以内。
 - improvements：3 条可执行训练，写清口令、组数和过关标准。
 - 每个 clip 的 strengths / problems / drills 各 3 条；drills 用「【问题】… → 【原因】… → 【训练】…」。
