@@ -34,7 +34,15 @@ from pipeline.analyze import (
 )
 from pipeline.coach import enrich_with_cursor
 from pipeline.contact import draw_hit_point, interpolate_xy
-from pipeline.detect import ObjectDetector, bind_ball_to_player, default_detect_path, draw_objects
+from pipeline.detect import (
+    ObjectDetector,
+    bind_ball_to_player,
+    default_detect_path,
+    draw_objects,
+    merge_objects,
+    player_crop_box,
+    shift_objects,
+)
 from pipeline.oss import object_key, require_configured, upload_file
 from pipeline.pose import FramePose, PoseEstimator, draw_pose
 
@@ -231,6 +239,81 @@ def _write_overlay(
     return overlay_pub, preview_pub
 
 
+def _contact_frame_ids(peaks: list[int], fps: float, n: int) -> list[int]:
+    need: set[int] = set()
+    pre = max(2, int(0.12 * fps))
+    post = max(3, int(0.40 * fps))
+    for p in peaks:
+        lo = max(0, int(p) - pre)
+        hi = min(n - 1, int(p) + post)
+        need.update(range(lo, hi + 1))
+    return sorted(need)
+
+
+def _refine_contact_objects(
+    video_path: Path,
+    det: ObjectDetector,
+    frame_ids: list[int],
+    xy_list,
+    conf_list,
+    obj_list,
+    target: int,
+    batch: int,
+) -> int:
+    """Zoom in on the player near each swing and re-detect ball/racket."""
+    if not frame_ids:
+        return 0
+    need = set(frame_ids)
+    grabbed: dict[int, np.ndarray] = {}
+    cap = cv2.VideoCapture(str(video_path))
+    idx = 0
+    while idx < target:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if idx in need:
+            grabbed[idx] = frame
+            if len(grabbed) == len(need):
+                break
+        idx += 1
+    cap.release()
+
+    crops: list[np.ndarray] = []
+    meta: list[tuple[int, int, int]] = []  # frame_i, ox, oy
+    for fi in frame_ids:
+        frame = grabbed.get(fi)
+        if frame is None or fi >= len(xy_list):
+            continue
+        box = player_crop_box(frame.shape, xy_list[fi], conf_list[fi])
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        crops.append(frame[y1:y2, x1:x2])
+        meta.append((fi, x1, y1))
+    if not crops:
+        return 0
+
+    updated = 0
+    step = max(1, int(batch))
+    for i in range(0, len(crops), step):
+        chunk = crops[i : i + step]
+        infos = meta[i : i + step]
+        found = det.infer_batch(
+            chunk,
+            imgsz=640,
+            conf=0.08,
+            min_ball_diam=3.0,
+            max_ball_diam=140.0,
+        )
+        for objs, (fi, ox, oy) in zip(found, infos):
+            shift_objects(objs, ox, oy)
+            if fi < len(obj_list):
+                merge_objects(obj_list[fi], objs)
+                bind_ball_to_player(obj_list[fi], xy_list[fi], conf_list[fi], max_dist=260.0)
+                updated += 1
+    return updated
+
+
 def _publish(job_id: str, rel: str, path: Path) -> dict:
     if not path.is_file():
         raise RuntimeError("保存文件失败，请稍后重试")
@@ -386,6 +469,19 @@ def analyze_video(
             labels.append(stroke_mode)
         else:
             labels.append(classify_swing(xy_list, conf_list, t_arr, p, handed, fps))
+
+    _emit(progress, step=3, step_name="找出挥拍", progress=80, message="正在对准击球点…")
+    refine_ids = _contact_frame_ids(peaks, fps, len(ts))
+    n_refined = _refine_contact_objects(
+        video_path,
+        det,
+        refine_ids,
+        xy_list,
+        conf_list,
+        obj_list,
+        target,
+        batch,
+    )
 
     ball_xy = interpolate_xy([o.ball_xy if o is not None else None for o in obj_list])
     racket_xy = [o.racket_xy if o is not None else None for o in obj_list]
@@ -674,6 +770,7 @@ def analyze_video(
                     if s.get("contact_source") in ("ball_racket", "ball_wrist", "ball")
                 )
             ),
+            "contact_refine_frames": int(n_refined),
         },
         "overlay_video": overlay_pub["url"],
         "overlay_oss_key": overlay_pub["key"],

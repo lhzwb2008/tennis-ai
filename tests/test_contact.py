@@ -107,5 +107,23 @@ class ContactTests(unittest.TestCase):
         self.assertTrue(hp.hand_reaches)
 
 
+class CropTests(unittest.TestCase):
+    def test_player_crop_and_shift(self):
+        from pipeline.detect import FrameObjects, player_crop_box, shift_objects
+
+        xy, conf = _pose(hip_x=400)
+        box = player_crop_box((544, 960, 3), xy, conf)
+        self.assertIsNotNone(box)
+        x1, y1, x2, y2 = box
+        self.assertGreater(x2 - x1, 80)
+        self.assertGreater(y2 - y1, 80)
+        objs = FrameObjects()
+        objs.ball_xy = np.array([10.0, 20.0])
+        objs.racket_box = np.array([1.0, 2.0, 8.0, 9.0])
+        shift_objects(objs, 100, 50)
+        self.assertEqual(list(objs.ball_xy), [110.0, 70.0])
+        self.assertEqual(list(objs.racket_box), [101.0, 52.0, 108.0, 59.0])
+
+
 if __name__ == "__main__":
     unittest.main()

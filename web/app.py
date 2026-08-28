@@ -30,7 +30,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 SAMPLE_CANDIDATES = [
     ROOT / "samples" / "demo.mp4",
 ]
-SAMPLE_CACHE_VERSION = "2.3-body-hit"
+SAMPLE_CACHE_VERSION = "2.4-contact-zoom"
 
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 SAMPLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)

@@ -48,24 +48,32 @@ class ObjectDetector:
     def infer(self, bgr: np.ndarray) -> FrameObjects:
         return self.infer_batch([bgr])[0]
 
-    def infer_batch(self, images: list[np.ndarray]) -> list[FrameObjects]:
+    def infer_batch(
+        self,
+        images: list[np.ndarray],
+        *,
+        imgsz: int = 640,
+        conf: float = 0.12,
+        max_ball_diam: float = 70.0,
+        min_ball_diam: float = 4.0,
+    ) -> list[FrameObjects]:
         if not images:
             return []
         results = self.model.predict(
             images,
             verbose=False,
-            imgsz=640,
-            conf=0.12,
+            imgsz=imgsz,
+            conf=conf,
             iou=0.5,
             max_det=20,
             classes=[SPORTS_BALL, TENNIS_RACKET],
             device=self.device,
             half=self.device == "cuda",
         )
-        return [_from_result(r) for r in results]
+        return [_from_result(r, min_ball_diam=min_ball_diam, max_ball_diam=max_ball_diam) for r in results]
 
 
-def _from_result(result) -> FrameObjects:
+def _from_result(result, min_ball_diam: float = 4.0, max_ball_diam: float = 70.0) -> FrameObjects:
     out = FrameObjects()
     boxes = getattr(result, "boxes", None)
     if boxes is None or len(boxes) == 0:
@@ -80,7 +88,7 @@ def _from_result(result) -> FrameObjects:
         h = float(box[3] - box[1])
         diam = max(w, h)
         if int(c) == SPORTS_BALL:
-            if 4 <= diam <= 70:
+            if min_ball_diam <= diam <= max_ball_diam:
                 balls.append((float(p), box))
         elif int(c) == TENNIS_RACKET:
             if diam >= 24:
@@ -127,6 +135,64 @@ def bind_ball_to_player(objs: FrameObjects, pose_xy, pose_conf, max_dist: float 
         objs.ball_xy = ranked[0]
     else:
         objs.ball_xy = None
+
+
+def player_crop_box(
+    frame_shape,
+    pose_xy,
+    pose_conf,
+    reach: float = 1.9,
+) -> tuple[int, int, int, int] | None:
+    """Box around the player, with room for the racket and incoming ball."""
+    h, w = int(frame_shape[0]), int(frame_shape[1])
+    conf = np.asarray(pose_conf)
+    xy = np.asarray(pose_xy, dtype=np.float64)
+    vis = conf > 0.28
+    if vis.sum() < 4:
+        return None
+    pts = xy[vis]
+    x1, y1 = float(pts[:, 0].min()), float(pts[:, 1].min())
+    x2, y2 = float(pts[:, 0].max()), float(pts[:, 1].max())
+    bw, bh = max(48.0, x2 - x1), max(48.0, y2 - y1)
+    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    side = max(bw, bh) * reach
+    xa = int(np.clip(cx - side * 0.58, 0, w - 1))
+    ya = int(np.clip(cy - side * 0.52, 0, h - 1))
+    xb = int(np.clip(cx + side * 0.58, 0, w))
+    yb = int(np.clip(cy + side * 0.62, 0, h))
+    if xb - xa < 96 or yb - ya < 96:
+        return None
+    return xa, ya, xb, yb
+
+
+def shift_objects(objs: FrameObjects, ox: float, oy: float) -> FrameObjects:
+    if objs.ball_xy is not None:
+        objs.ball_xy = objs.ball_xy + np.array([ox, oy], dtype=np.float64)
+    objs.ball_candidates = [
+        np.asarray(c, dtype=np.float64) + np.array([ox, oy], dtype=np.float64)
+        for c in (objs.ball_candidates or [])
+        if c is not None
+    ]
+    if objs.racket_xy is not None:
+        objs.racket_xy = objs.racket_xy + np.array([ox, oy], dtype=np.float64)
+    if objs.racket_box is not None:
+        objs.racket_box = objs.racket_box + np.array([ox, oy, ox, oy], dtype=np.float64)
+    return objs
+
+
+def merge_objects(base: FrameObjects, extra: FrameObjects) -> FrameObjects:
+    """Keep a first-pass detection unless the zoom pass actually saw the object."""
+    if extra.has_ball:
+        base.ball_xy = extra.ball_xy
+        base.ball_conf = extra.ball_conf
+        base.ball_candidates = list(extra.ball_candidates or [])
+    elif extra.ball_candidates:
+        base.ball_candidates = list(extra.ball_candidates)
+    if extra.has_racket:
+        base.racket_xy = extra.racket_xy
+        base.racket_box = extra.racket_box
+        base.racket_conf = extra.racket_conf
+    return base
 
 
 def draw_objects(bgr: np.ndarray, objs: FrameObjects) -> np.ndarray:
