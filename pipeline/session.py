@@ -34,7 +34,7 @@ from pipeline.analyze import (
 )
 from pipeline.coach import enrich_with_cursor
 from pipeline.contact import draw_hit_point, interpolate_xy
-from pipeline.detect import ObjectDetector, default_detect_path, draw_objects
+from pipeline.detect import ObjectDetector, bind_ball_to_player, default_detect_path, draw_objects
 from pipeline.oss import object_key, require_configured, upload_file
 from pipeline.pose import FramePose, PoseEstimator, draw_pose
 
@@ -331,6 +331,7 @@ def analyze_video(
         poses = est.infer_batch(buf)
         objects = det.infer_batch(buf)
         for frame, pose, objs in zip(buf, poses, objects):
+            bind_ball_to_player(objs, pose.xy, pose.conf)
             vis = draw_objects(draw_pose(frame, pose), objs)
             vis = _draw_hud(vis, i / fps, pose.ok, i + 1, target)
             xy_list.append(pose.xy)

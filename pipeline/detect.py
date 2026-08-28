@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -20,6 +20,7 @@ class FrameObjects:
     racket_xy: np.ndarray | None = None
     racket_box: np.ndarray | None = None
     racket_conf: float = 0.0
+    ball_candidates: list = field(default_factory=list)
 
     @property
     def has_ball(self) -> bool:
@@ -85,6 +86,11 @@ def _from_result(result) -> FrameObjects:
             if diam >= 24:
                 rackets.append((float(p), box))
     if balls:
+        centers = [
+            np.array([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2], dtype=np.float64)
+            for _, box in balls
+        ]
+        out.ball_candidates = centers
         p, box = max(balls, key=lambda x: x[0])
         out.ball_conf = p
         out.ball_xy = np.array([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2], dtype=np.float64)
@@ -94,6 +100,33 @@ def _from_result(result) -> FrameObjects:
         out.racket_box = box.astype(np.float64)
         out.racket_xy = np.array([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2], dtype=np.float64)
     return out
+
+
+def bind_ball_to_player(objs: FrameObjects, pose_xy, pose_conf, max_dist: float = 220.0) -> None:
+    """Prefer the ball nearest the racket or either wrist, not a stray ball on court."""
+    cands = [np.asarray(b, dtype=np.float64) for b in (objs.ball_candidates or []) if b is not None]
+    if objs.ball_xy is not None and not cands:
+        cands = [np.asarray(objs.ball_xy, dtype=np.float64)]
+    if not cands:
+        return
+    anchors: list[np.ndarray] = []
+    if objs.racket_xy is not None:
+        anchors.append(np.asarray(objs.racket_xy, dtype=np.float64))
+    if pose_xy is not None and pose_conf is not None:
+        for i in (9, 10):
+            if float(pose_conf[i]) > 0.3:
+                anchors.append(np.asarray(pose_xy[i], dtype=np.float64))
+    if not anchors:
+        return
+
+    def dist(b):
+        return min(float(np.linalg.norm(b - a)) for a in anchors)
+
+    ranked = sorted(cands, key=dist)
+    if dist(ranked[0]) <= max_dist:
+        objs.ball_xy = ranked[0]
+    else:
+        objs.ball_xy = None
 
 
 def draw_objects(bgr: np.ndarray, objs: FrameObjects) -> np.ndarray:
