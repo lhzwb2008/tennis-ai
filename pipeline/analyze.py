@@ -583,7 +583,6 @@ def summarize(swings: list[SwingMetrics], takeback_is_ratio: bool = False) -> di
         ),
         "hit_height": _mean_hit(swings, "height"),
         "hit_side": _mean_hit(swings, "side"),
-        "hit_sweet": _mean_hit(swings, "sweet"),
         "shoulder_aim": _mean_hit(swings, "shoulder_aim"),
         "hand_reaches_rate": float(
             round(
@@ -851,8 +850,8 @@ def score_and_write(
         "本报告根据训练录像自动生成，仅供练习参考，不能替代现场教练。",
         "拍摄角度会影响判断：背面录像较难看清击球点前后位置和拍面开合。",
         "评分来自画面，距离和角度会有一定误差。",
-        "能看到球或球拍时，击球画面按球和拍头的距离选取，并标出实际击球点（实心圈）和理想区（虚线圈）。",
-        "理想击球点：胸口高度、持拍一侧稍外侧、身前大约 45°。单路录像看不到真实 3D，高度和左右/前后会受拍摄角度影响。",
+        "能看到球或球拍时，击球画面按球和拍的距离选取，并标出相对身体的击球点（实心圈）和理想区（虚线圈）。",
+        "理想击球点：胸口高度、持拍一侧稍外侧、身前大约 45°。不判断球打在拍面哪里。单路录像看不到真实 3D，高度和左右/前后会受拍摄角度影响。",
         "旋转根据挥拍轨迹和拍面朝向估计，不是测球的转速。",
     ]
 

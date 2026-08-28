@@ -80,7 +80,7 @@ def racket_head_xy(box, wrist) -> np.ndarray | None:
     corners = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float64)
     far = corners[int(np.argmax(np.linalg.norm(corners - w, axis=1)))]
     handle = corners[int(np.argmin(np.linalg.norm(corners - w, axis=1)))]
-    # 甜区大约在拍头中部，不是拍框最远端
+    # 拍头在远离手腕的一端，用来对准击球帧，不评拍上打点
     return handle + 0.72 * (far - handle)
 
 
@@ -224,16 +224,6 @@ def _forward_label(f: float | None) -> str:
     return "偏晚贴身"
 
 
-def _sweet_label(s: float | None) -> str:
-    if s is None:
-        return "甜区看不清"
-    if s >= 0.62:
-        return "甜区附近"
-    if s >= 0.38:
-        return "拍面能碰到"
-    return "偏拍框/拍柄"
-
-
 @dataclass
 class HitPoint:
     xy: np.ndarray | None = None
@@ -244,11 +234,9 @@ class HitPoint:
     side: float | None = None
     forward: float | None = None
     angle_deg: float | None = None
-    sweet: float | None = None
     height_label: str = ""
     side_label: str = ""
     forward_label: str = ""
-    sweet_label: str = ""
     summary: str = ""
     ok: bool = False
     source: str = "none"
@@ -272,11 +260,9 @@ class HitPoint:
             "side": None if self.side is None else round(float(self.side), 3),
             "forward": None if self.forward is None else round(float(self.forward), 3),
             "angle_deg": None if self.angle_deg is None else round(float(self.angle_deg), 1),
-            "sweet": None if self.sweet is None else round(float(self.sweet), 3),
             "height_label": self.height_label,
             "side_label": self.side_label,
             "forward_label": self.forward_label,
-            "sweet_label": self.sweet_label,
             "summary": self.summary,
             "ok": self.ok,
             "source": self.source,
@@ -339,15 +325,6 @@ def measure_hit_point(
     if hp.side is not None and hp.forward is not None:
         hp.angle_deg = float(np.degrees(np.arctan2(abs(hp.side), max(hp.forward, 1e-3))))
 
-    head = racket_head_xy(racket_box, wrist)
-    b = _as2(ball)
-    if b is not None and head is not None and racket_box is not None:
-        box = np.asarray(racket_box, dtype=np.float64).reshape(-1)
-        diag = float(np.hypot(box[2] - box[0], box[3] - box[1]))
-        if diag > 8:
-            d = float(np.linalg.norm(b - head))
-            hp.sweet = float(np.clip(1.0 - d / (0.38 * diag), 0.0, 1.0))
-
     hp.height_label = _height_label(hp.height)
     hp.side_label = _side_label(hp.side, hitting) if view == "back" else "侧面看不清左右"
     if view == "side" and enable_forward:
@@ -362,9 +339,6 @@ def measure_hit_point(
         bits.append(hp.side_label)
     else:
         bits.append(hp.forward_label)
-    if hp.sweet_label or hp.sweet is not None:
-        hp.sweet_label = _sweet_label(hp.sweet)
-        bits.append(hp.sweet_label)
     hp.summary = " · ".join(bits)
 
     height_ok = hp.height is not None and -0.12 <= hp.height <= 0.14
@@ -372,8 +346,7 @@ def measure_hit_point(
         place_ok = hp.side is not None and 0.14 <= hp.side <= 0.50
     else:
         place_ok = hp.forward is not None and 0.08 <= hp.forward <= 0.48
-    sweet_ok = hp.sweet is None or hp.sweet >= 0.35
-    hp.ok = bool(height_ok and place_ok and sweet_ok)
+    hp.ok = bool(height_ok and place_ok)
 
     if chest is not None and hip is not None:
         ideal = chest.copy()
@@ -507,11 +480,6 @@ def score_hit_point(hits: list[HitPoint], view: str, late_rate: float) -> float:
             pts += 1.5
         else:
             pts -= 2.5
-        if h.sweet is not None:
-            if h.sweet >= 0.62:
-                pts += 2.0
-            elif h.sweet < 0.32:
-                pts -= 1.0
         if h.both_feet_off:
             pts -= 1.0
         parts.append(float(np.clip(pts, 3, 20)))

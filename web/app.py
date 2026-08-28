@@ -30,7 +30,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 SAMPLE_CANDIDATES = [
     ROOT / "samples" / "demo.mp4",
 ]
-SAMPLE_CACHE_VERSION = "2.2-hitpoint"
+SAMPLE_CACHE_VERSION = "2.3-body-hit"
 
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 SAMPLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -64,6 +64,12 @@ def _load_sample_cache(src: Path, stroke: str) -> Path | None:
     if (cache / "report.json").is_file():
         return cache
     return None
+
+
+def _clear_sample_cache(src: Path, stroke: str) -> None:
+    cache = _sample_cache_dir(src, stroke)
+    if cache.is_dir():
+        shutil.rmtree(cache, ignore_errors=True)
 
 
 def _save_sample_cache(job_id: str, src: Path, stroke: str) -> None:
@@ -333,6 +339,7 @@ def sample_info():
 async def analyze(
     video: UploadFile | None = File(default=None),
     sample: str = Form(default="0"),
+    refresh: str = Form(default="0"),
     max_seconds: float = Form(default=0),
     stroke: str = Form(default="auto"),
     title: str = Form(default="网球挥拍测评报告 2.0"),
@@ -341,11 +348,12 @@ async def analyze(
         stroke = "auto"
 
     use_sample = sample in ("1", "true", "yes")
+    force_refresh = refresh in ("1", "true", "yes")
     src = _sample_path() if use_sample else None
     if use_sample:
         if src is None:
             raise HTTPException(400, "没有可用的样例视频")
-        cache = _load_sample_cache(src, stroke)
+        cache = None if force_refresh else _load_sample_cache(src, stroke)
         if cache is not None:
             job_id = uuid.uuid4().hex[:12]
             meta = _install_sample_cache(job_id, cache)
@@ -374,6 +382,9 @@ async def analyze(
 
     if _busy_job():
         raise HTTPException(409, "正在分析其他录像，请稍后再试")
+
+    if use_sample and force_refresh and src is not None:
+        _clear_sample_cache(src, stroke)
 
     job_id = uuid.uuid4().hex[:12]
     out_dir = JOBS_DIR / job_id

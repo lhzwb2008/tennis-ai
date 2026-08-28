@@ -273,10 +273,11 @@
           </select>
           <button class="btn" id="pick" type="button">选择文件</button>
           <button class="btn primary" id="sample" type="button">分析 1 分钟样例</button>
+          <button class="btn" id="sample-refresh" type="button">重新跑样例</button>
         </div>
         <p class="hint" id="busy" hidden></p>
         <input id="file" type="file" accept="video/mp4,video/quicktime,video/webm" hidden />
-        <p class="hint">支持 mp4 / mov / webm。样例是侧面训练录像，会分析前 60 秒；分析过一次后再次点击会直接打开报告。</p>
+        <p class="hint">支持 mp4 / mov / webm。样例是侧面训练录像，会分析前 60 秒。平常点「分析样例」会打开上次结果；改了算法后点「重新跑样例」，大约要 6 分钟。</p>
         <div class="pillars">
           <div class="pillar"><b>重心</b>越稳越好，尽量保持低重心</div>
           <div class="pillar"><b>击球点</b>胸口高度、持拍侧稍外、身前约 45°</div>
@@ -353,19 +354,23 @@
     };
     file.onchange = () => { if (file.files[0]) startUpload(file.files[0]); };
     $("sample").onclick = () => startUpload(null, true);
+    $("sample-refresh").onclick = () => startUpload(null, true, true);
+    window.rerunSample = () => startUpload(null, true, true);
 
-    async function startUpload(f, sample=false) {
+    async function startUpload(f, sample=false, refresh=false) {
       const fd = new FormData();
       fd.append("stroke", $("stroke").value);
       fd.append("sample", sample ? "1" : "0");
+      fd.append("refresh", refresh ? "1" : "0");
       if (f) fd.append("video", f);
       const busy = $("busy");
       if (busy) { busy.hidden = true; busy.textContent = ""; }
-      if (!sample) {
+      if (!sample || refresh) {
+        reportEl.classList.add("hidden");
         upload.classList.add("hidden");
         analyzing.classList.remove("hidden");
         paintSteps(1);
-        $("msg").textContent = "正在提交任务…";
+        $("msg").textContent = refresh ? "正在重新分析样例…" : "正在提交任务…";
       }
       const res = await fetch("api/analyze", { method: "POST", body: fd });
       if (!res.ok) {
@@ -514,7 +519,6 @@
       if (hp.height_label) pills.push(`<span class="pill">高度 · ${esc(hp.height_label)}</span>`);
       if (hp.side_label && hp.side_label.indexOf("看不清") < 0) pills.push(`<span class="pill">左右 · ${esc(hp.side_label)}</span>`);
       if (hp.forward_label && hp.forward_label.indexOf("看不清") < 0) pills.push(`<span class="pill">前后 · ${esc(hp.forward_label)}</span>`);
-      if (hp.sweet_label && hp.sweet_label.indexOf("看不清") < 0) pills.push(`<span class="pill">${esc(hp.sweet_label)}</span>`);
       if (hp.hand_reaches) pills.push(`<span class="pill bad">左肩应对准来球，不是左手</span>`);
       if (hp.both_feet_off) pills.push(`<span class="pill bad">双脚同时离地</span>`);
       if (hp.early_step) pills.push(`<span class="pill bad">随挥过肩后再上步</span>`);
@@ -563,7 +567,7 @@
           <ul>${a.drills.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
         </div>
         <div class="swings">${swings}</div>
-        <p class="legend">击球画面里：<b>实心十字</b>是实际击球点（球碰到拍的位置），<i>虚线圈</i>是理想区（胸口高度、持拍侧稍外、身前约 45°）。</p>`;
+        <p class="legend">击球画面里：<b>实心十字</b>是相对身体的击球点，<i>虚线圈</i>是理想区（胸口高度、持拍侧稍外、身前约 45°）。不判断球打在拍面哪里。</p>`;
     }
 
     function showReport(data) {
@@ -585,6 +589,7 @@
       let cur = 0;
       reportEl.innerHTML = `
         <div class="actions no-print">
+          <button class="btn" type="button" onclick="window.rerunSample()">重新跑样例</button>
           <button class="btn" type="button" onclick="window.print()">导出 / 打印报告</button>
         </div>
         <article class="paper">
