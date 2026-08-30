@@ -552,6 +552,11 @@
       return pills.join("");
     }
 
+    function flagPills(s) {
+      const notes = s.flag_notes || [];
+      return notes.map((n) => `<span class="pill bad">${esc(n)}</span>`).join("");
+    }
+
     function contactPill(s) {
       const hp = s.hit_point;
       if (hp && hp.summary) {
@@ -594,7 +599,7 @@
             ? `<span class="pill">反手</span>`
             : `<span class="pill">上旋正手</span>`;
         return `<article class="swing">
-          <div class="barline"><span>挥拍 ${s.index} · ${s.contact_t.toFixed(1)} 秒</span>${kind}${seen}${contactPill(s)}${speedPills(s)}</div>
+          <div class="barline"><span>挥拍 ${s.index} · ${s.contact_t.toFixed(1)} 秒</span>${kind}${seen}${contactPill(s)}${speedPills(s)}${flagPills(s)}</div>
           <div class="phases">${figs}</div>
           ${hitNotes(s)}
         </article>`;

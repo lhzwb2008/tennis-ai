@@ -34,6 +34,7 @@ from pipeline.analyze import (
 )
 from pipeline.coach import enrich_with_cursor
 from pipeline.contact import draw_hit_point, interpolate_xy
+from pipeline.technique import flag_notes
 from pipeline.speed import mean_speeds
 from pipeline.detect import (
     ObjectDetector,
@@ -534,10 +535,8 @@ def analyze_video(
             view=view,
             pose_xy=xy_list,
             pose_conf=conf_list,
+            stroke=stroke,
         )
-        if stroke == "backhand":
-            for sw in swings:
-                sw.shot_kind = "backhand"
         for sw in swings:
             if sw.hit_point is not None:
                 contact_hits[int(sw.contact_i)] = sw.hit_point
@@ -594,6 +593,8 @@ def analyze_video(
                 "index": si,
                 "contact_t": round(sw.contact_t, 3),
                 "elbow_deg": None if sw.elbow_contact is None else round(sw.elbow_contact, 1),
+                "elbow_takeback_deg": None if sw.elbow_takeback is None else round(sw.elbow_takeback, 1),
+                "elbow_follow_deg": None if sw.elbow_follow is None else round(sw.elbow_follow, 1),
                 "knee_deg": None if sw.knee_contact is None else round(sw.knee_contact, 1),
                 "cog_ratio": None if sw.cog_ready is None else round(sw.cog_ready, 3),
                 "stance_ratio": None if sw.stance_ready is None else round(sw.stance_ready, 3),
@@ -608,6 +609,14 @@ def analyze_video(
                 "racket_speed": None if sw.racket_speed is None else round(sw.racket_speed, 1),
                 "path_lift": sw.path_lift,
                 "shot_kind": sw.shot_kind,
+                "slot_drop": sw.slot_drop,
+                "body_turn": sw.body_turn,
+                "weight_shift": sw.weight_shift,
+                "follow_forward": sw.follow_forward,
+                "follow_up": sw.follow_up,
+                "takeback_dt": sw.takeback_dt,
+                "tech_flags": list(sw.tech_flags or []),
+                "flag_notes": flag_notes(sw.tech_flags or []),
                 "speeds": sw.speeds,
                 "phases": phases,
             }

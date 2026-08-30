@@ -152,6 +152,9 @@ class SpeedTests(unittest.TestCase):
         self.assertIsNotNone(sp["wrist_kmh"])
         self.assertIsNotNone(sp["ball_out_kmh"])
         self.assertTrue(np.isfinite(track_to_xy(wrist, n)).all())
+        self.assertIsNotNone(swings[0].elbow_takeback)
+        self.assertIsNotNone(swings[0].slot_drop)
+        self.assertIsInstance(swings[0].tech_flags, list)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from typing import Callable
 
 from pipeline.analyze import SCORE_AXES, grade_from_score
 from pipeline.cursor_client import available, model_id, model_params, run_with_stream, start_prompt
+from pipeline.technique import prompt_knowledge
 
 ProgressCb = Callable[[dict], None]
 
@@ -72,26 +73,49 @@ def _phase_filename(info: dict) -> str:
     return ""
 
 
-def _pick_keyframes(clips: list[dict], kf_dir: Path, limit: int = 4) -> list[tuple[str, Path]]:
+_PHASE_HINT = {
+    "ready": "准备（重心、步幅、前肩）",
+    "takeback": "引拍（转体还是只动手，拍头是否后下方）",
+    "contact": "击球（击球点、膝盖）",
+    "follow": "随挥（过肩还是垂直上拎）",
+}
+
+
+def _pick_keyframes(clips: list[dict], kf_dir: Path, limit: int = 5) -> list[tuple[str, Path]]:
     picks: list[tuple[str, Path]] = []
     seen: set[str] = set()
-    order = ("contact", "takeback")
     kf_dir = Path(kf_dir)
+
+    def try_add(clip: dict, sw: dict, phase: str) -> bool:
+        if len(picks) >= limit:
+            return False
+        info = (sw.get("phases") or {}).get(phase) or {}
+        name = _phase_filename(info)
+        if not name or name in seen:
+            return False
+        path = kf_dir / name
+        if not path.is_file():
+            return False
+        seen.add(name)
+        hint = _PHASE_HINT.get(phase, phase)
+        label = f"{clip.get('label')} 挥拍#{sw.get('index')} {hint} t={sw.get('contact_t')}"
+        picks.append((label, path))
+        return True
+
+    # 同一拍的引拍→击球→随挥→准备，才能看出擦玻璃和收拍方向。
     for clip in clips:
-        for sw in clip.get("swings") or []:
-            for phase in order:
-                info = (sw.get("phases") or {}).get(phase) or {}
-                name = _phase_filename(info)
-                if not name or name in seen:
-                    continue
-                path = kf_dir / name
-                if not path.is_file():
-                    continue
-                seen.add(name)
-                label = f"{clip.get('label')} 挥拍#{sw.get('index')} {phase} t={sw.get('contact_t')}"
-                picks.append((label, path))
-                if len(picks) >= limit:
-                    return picks
+        swings = clip.get("swings") or []
+        if not swings:
+            continue
+        for phase in ("takeback", "contact", "follow", "ready"):
+            try_add(clip, swings[0], phase)
+            if len(picks) >= limit:
+                return picks
+    for clip in clips:
+        for sw in (clip.get("swings") or [])[1:]:
+            try_add(clip, sw, "contact")
+            if len(picks) >= limit:
+                return picks
     if picks:
         return picks
     for path in sorted(kf_dir.glob("*.jpg"))[:limit]:
@@ -99,36 +123,82 @@ def _pick_keyframes(clips: list[dict], kf_dir: Path, limit: int = 4) -> list[tup
     return picks
 
 
+_SWING_KEYS = (
+    "index",
+    "contact_t",
+    "shot_kind",
+    "late_contact",
+    "contact_forward",
+    "hit_point",
+    "cog_stable",
+    "chain_order",
+    "racket_speed",
+    "speeds",
+    "path_lift",
+    "cog_ratio",
+    "knee_deg",
+    "contact_source",
+    "elbow_deg",
+    "elbow_takeback_deg",
+    "elbow_follow_deg",
+    "takeback_ratio",
+    "stance_ratio",
+    "slot_drop",
+    "body_turn",
+    "weight_shift",
+    "follow_forward",
+    "follow_up",
+    "takeback_dt",
+    "tech_flags",
+    "flag_notes",
+)
+
+_METRIC_KEYS = (
+    "n_swings",
+    "elbow_contact_deg",
+    "elbow_takeback_deg",
+    "elbow_follow_deg",
+    "knee_contact_deg",
+    "cog_ratio",
+    "cog_stable",
+    "stance_ratio",
+    "takeback_ratio",
+    "late_contact_rate",
+    "chain_order",
+    "path_lift",
+    "slot_drop",
+    "body_turn",
+    "weight_shift",
+    "follow_forward",
+    "follow_up",
+    "flag_rates",
+    "hit_height",
+    "shoulder_aim",
+    "hand_reaches_rate",
+    "both_feet_off_rate",
+    "early_step_rate",
+)
+
+
 def _slim_report(report: dict) -> dict:
     clips = []
     for c in report.get("clips") or []:
         swings = []
         for s in (c.get("swings") or [])[:6]:
-            swings.append(
-                {
-                    "index": s.get("index"),
-                    "contact_t": s.get("contact_t"),
-                    "shot_kind": s.get("shot_kind"),
-                    "late_contact": s.get("late_contact"),
-                    "contact_forward": s.get("contact_forward"),
-                    "hit_point": s.get("hit_point"),
-                    "cog_stable": s.get("cog_stable"),
-                    "chain_order": s.get("chain_order"),
-                    "racket_speed": s.get("racket_speed"),
-                    "speeds": s.get("speeds"),
-                    "path_lift": s.get("path_lift"),
-                    "cog_ratio": s.get("cog_ratio"),
-                    "knee_deg": s.get("knee_deg"),
-                    "contact_source": s.get("contact_source"),
-                }
-            )
+            swings.append({k: s.get(k) for k in _SWING_KEYS})
+        analysis = c.get("analysis") or {}
+        summary = c.get("summary") or {}
         clips.append(
             {
                 "id": c.get("id"),
                 "label": c.get("label"),
                 "hitting_arm": c.get("hitting_arm"),
-                "summary": c.get("summary"),
+                "metrics": {k: summary.get(k) for k in _METRIC_KEYS},
                 "scores_rule": c.get("scores"),
+                "rule_hints": {
+                    "strengths": (analysis.get("strengths") or [])[:5],
+                    "problems": (analysis.get("problems") or [])[:6],
+                },
                 "swings": swings,
             }
         )
@@ -147,28 +217,39 @@ def _build_prompt(report: dict, captions: list[str]) -> str:
     payload = json.dumps(_slim_report(report), ensure_ascii=False, indent=2)
     caps = "\n".join(f"- 图片{i+1}: {c}" for i, c in enumerate(captions)) or "（无附图）"
     ids = "、".join(c.get("id") or "" for c in report.get("clips") or []) or "forehand"
+    handed = report.get("handedness") or "right"
+    knowledge = prompt_knowledge(
+        [c.get("id") or "" for c in report.get("clips") or []],
+        handed,
+    )
     return f"""你是有执教经验的网球私教，写一份给认真练球的球友看的深度点评。不要改文件、不要跑命令、不要读仓库。
 
 附图：
 {caps}
 
+{knowledge}
+
 【判断动作，不要想当然】
 - shot_mix 和 clips.id 是测量结果。没有 backhand 就不要写反手；正手切削（forehand_slice，path_lift 低或为负）不是反手。
 - 重心要拆开写：偏高（直立挡球）和不稳定（击球时头肩上下晃）可以同时存在，不要只写其中一个。
-- 对照画面说具体现象（哪类球、准备/击球/随挥），不要空泛的「继续努力」。
+- 对照画面说具体现象（哪类球、准备/引拍/击球/随挥），不要空泛的「继续努力」。
 - 击球点看 hit_point：只谈相对身体的位置（胸口高度、持拍一侧稍外、身前大约 45°）。用「高了/低了、偏左/偏右、偏前/偏晚」说话。不要写球拍甜区、拍框、拍柄，也不要判断球打在拍面哪里。
 - 准备时对准来球的是前肩（右手持拍是左肩），不是前手。禁止写「左手指向来球」当优点。
 - 击球瞬间不能双脚同时离地（后脚脚尖点地可以）。随挥过肩之后才能上步。
 - 用短句、大白话。少用「动力链」「加载」这种词，改成「腰先转、手后到」「先蹲再打」。
 - speeds 里的 *_kmh 是画面比例估算（拍头、手腕、转髋、来球、出球），单位公里每小时。可以写「拍头大约 xx」，不要写成测速雷达，不要和职业球员雷达数据硬比。没有数字就不要编。
+- 钟表方向（掌心 6:00 等）是教练口令，单路视频通常看不准。能看清手腕/前臂就写「拍头偏后下方」或「拍面朝侧面」；看不清不要编钟点。
+- 擦玻璃 vs 拍凳子：看引拍结束后球拍有没有先由高往低落到腰再向前，以及球是否往天上飞。slot_drop / tech_flags 是旁证，要和附图对照。
+- rule_hints 和 tech_flags 是测量层已经抓到的点，必须写进点评，不要只反复写「重心」「击球点」两句空话。对照技术清单把准备、引拍、击球、随挥都点到。
+- 不要把同一句换说法凑数。画面和测量都看不清的细节不要编。
 
 【四维满分】重心 25、击球点 20、动力链 30、击球效果 25。分数可按画面微调，不要编造没出现的动作。
 
 【写深一点】
-- summary 160–220 字：先点最大亮点，再写两个最要紧的问题，带一点因果。句子要短，球友扫一眼就能懂。
+- summary 160–220 字：先点最大亮点，再写两个最要紧的问题，带一点因果。用清单里的说法（擦玻璃、拍凳子、前肩对球），但必须结合这次测量和画面。
 - focus：这次练球最该抓的一件事，40 字以内。
 - improvements：3 条可执行训练，写清口令、组数和过关标准。
-- 每个 clip 的 strengths / problems / drills 各 3 条；drills 用「【问题】… → 【原因】… → 【训练】…」。
+- 每个 clip 的 strengths 2–3 条；problems 3–5 条，至少覆盖引拍和击球两段；drills 3 条，用「【问题】… → 【原因】… → 【训练】…」。
 - 只点评这些 clip id：{ids}
 
 【测量 JSON】

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
-from pipeline.contact import HitPoint, measure_hit_point, refine_contact_index, score_hit_point
+from pipeline.contact import HitPoint, measure_hit_point, racket_head_xy, refine_contact_index, score_hit_point
 from pipeline.pose import KPT
+from pipeline.technique import extra_findings, flag_rates, flags_from_values
 from pipeline.speed import (
     ball_track_xy,
     estimate_kmh,
@@ -347,6 +348,19 @@ class SwingMetrics:
     shot_kind: str = "topspin"
     hit_point: HitPoint | None = None
     speeds: dict | None = None
+    elbow_takeback: float | None = None
+    elbow_follow: float | None = None
+    slot_drop: float | None = None
+    takeback_height: float | None = None
+    body_turn: float | None = None
+    wrist_back: float | None = None
+    weight_shift: float | None = None
+    torso_lean: float | None = None
+    follow_forward: float | None = None
+    follow_up: float | None = None
+    head_above_wrist: float | None = None
+    takeback_dt: float | None = None
+    tech_flags: list[str] = field(default_factory=list)
 
 
 def _arr_at(arr: np.ndarray | None, i: int) -> np.ndarray | None:
@@ -371,6 +385,26 @@ def _peak_index(arr: np.ndarray | None, lo: int, hi: int) -> int | None:
     return lo + int(np.argmax(filled))
 
 
+def _back_comp(pt, hip, load_sign: float, torso: float) -> float | None:
+    if pt is None or hip is None or torso < 1:
+        return None
+    return float((float(pt[0]) - float(hip[0])) * load_sign) / torso
+
+
+def _slot_drop(wrist_xy: np.ndarray | None, lo: int, contact_i: int, torso: float, fps: float) -> float | None:
+    if wrist_xy is None or torso < 1 or lo < 0 or lo >= len(wrist_xy):
+        return None
+    y0 = wrist_xy[lo, 1]
+    if not np.isfinite(y0):
+        return None
+    hi = min(len(wrist_xy), max(lo + 1, contact_i - max(2, int(0.05 * fps))))
+    seg = wrist_xy[lo:hi, 1]
+    finite = seg[np.isfinite(seg)]
+    if finite.size == 0:
+        return None
+    return float((float(np.max(finite)) - float(y0)) / torso)
+
+
 def measure_swings(
     series: ClipSeries,
     fps: float,
@@ -383,6 +417,7 @@ def measure_swings(
     view: str = "side",
     pose_xy: list | None = None,
     pose_conf: list | None = None,
+    stroke: str = "forehand",
 ) -> list[SwingMetrics]:
     peaks = detect_swings(series) if peaks is None else peaks
     out: list[SwingMetrics] = []
@@ -570,7 +605,93 @@ def measure_swings(
                 face_vert = float(bh / (bw + bh))
 
         lift_v = None if path_lift is None else round(path_lift, 3)
-        shot_kind = "slice" if (lift_v is not None and lift_v < 0.08) else "topspin"
+        if stroke == "backhand":
+            shot_kind = "backhand"
+            flag_kind = "backhand"
+        elif lift_v is not None and lift_v < 0.08:
+            shot_kind = "slice"
+            flag_kind = "forehand_slice"
+        else:
+            shot_kind = "topspin"
+            flag_kind = "forehand"
+
+        w_src = wrist_src
+        hip_tb = _arr_at(series.hip_xy, takeback_i)
+        hip_c = _arr_at(series.hip_xy, p)
+        hip_rd = _arr_at(series.hip_xy, ready)
+        w_tb = _arr_at(w_src, takeback_i)
+        w_c = _arr_at(w_src, p)
+        w_rd = _arr_at(w_src, ready)
+        w_fl = _arr_at(w_src, follow)
+
+        slot_drop = _slot_drop(w_src, takeback_i, p, torso, fps)
+        takeback_height = None
+        if hip_tb is not None and w_tb is not None:
+            takeback_height = float((float(hip_tb[1]) - float(w_tb[1])) / torso)
+
+        hit_sh = "r_shoulder" if hitting == "right" else "l_shoulder"
+
+        def _sh_back(xy, cf):
+            if xy is None or cf is None:
+                return None
+            sh = _pt(xy, cf, hit_sh)
+            hip = _mid(_pt(xy, cf, "l_hip"), _pt(xy, cf, "r_hip"))
+            return _back_comp(sh, hip, load_sign, torso)
+
+        s_rd, s_tb = _sh_back(xy_rd, cf_rd), _sh_back(xy_tb, cf_tb)
+        body_turn = None if s_rd is None or s_tb is None else float(s_tb - s_rd)
+        wb_rd = _back_comp(w_rd, hip_rd, load_sign, torso)
+        wb_tb = _back_comp(w_tb, hip_tb, load_sign, torso)
+        wrist_back = None if wb_rd is None or wb_tb is None else float(wb_tb - wb_rd)
+
+        weight_shift = None
+        if hip_tb is not None and hip_c is not None:
+            weight_shift = float((float(hip_c[0]) - float(hip_tb[0])) * (-load_sign) / torso)
+
+        torso_lean = None
+        if xy_c is not None and cf_c is not None:
+            sh_mid = _mid(_pt(xy_c, cf_c, "l_shoulder"), _pt(xy_c, cf_c, "r_shoulder"))
+            hip_pt = _mid(_pt(xy_c, cf_c, "l_hip"), _pt(xy_c, cf_c, "r_hip"))
+            if sh_mid is not None and hip_pt is not None:
+                torso_lean = float((float(sh_mid[0]) - float(hip_pt[0])) * (-load_sign) / torso)
+
+        follow_forward = follow_up = None
+        if w_c is not None and w_fl is not None:
+            follow_forward = float((float(w_fl[0]) - float(w_c[0])) * (-load_sign) / torso)
+            follow_up = float((float(w_c[1]) - float(w_fl[1])) / torso)
+
+        head_above_wrist = None
+        box_tb = racket_box[takeback_i] if racket_box is not None and takeback_i < len(racket_box) else None
+        head_tb = racket_head_xy(box_tb, w_tb) if box_tb is not None else None
+        if head_tb is not None and w_tb is not None:
+            head_above_wrist = float((float(w_tb[1]) - float(head_tb[1])) / torso)
+
+        elbow_tb = _val_at(series.elbow, takeback_i, takeback_i, takeback_i + 1, "at")
+        elbow_ct = _val_at(series.elbow, p, p, min(n, p + 2), "at")
+        elbow_fl = _val_at(series.elbow, follow, follow, min(n, follow + 1), "at")
+        takeback_dt = float(series.t[p] - series.t[takeback_i])
+        tech_flags = flags_from_values(
+            flag_kind,
+            view=view,
+            slot_drop=slot_drop,
+            takeback_height=takeback_height,
+            body_turn=body_turn,
+            wrist_back=wrist_back,
+            weight_shift=weight_shift,
+            torso_lean=torso_lean,
+            follow_forward=follow_forward,
+            follow_up=follow_up,
+            takeback_dt=takeback_dt,
+            elbow_takeback=elbow_tb,
+            elbow_contact=elbow_ct,
+            elbow_follow=elbow_fl,
+            head_above_wrist=head_above_wrist,
+            hand_reaches=bool(hit_pt.hand_reaches) if hit_pt is not None else False,
+        )
+
+        def _r3(v):
+            return None if v is None else round(float(v), 3)
+
         out.append(
             SwingMetrics(
                 contact_i=p,
@@ -578,7 +699,7 @@ def measure_swings(
                 ready_i=ready,
                 takeback_i=takeback_i,
                 follow_i=follow,
-                elbow_contact=_val_at(series.elbow, p, p, min(n, p + 2), "at"),
+                elbow_contact=elbow_ct,
                 knee_contact=_val_at(series.knee, p, max(0, p - 2), min(n, p + 2), "min"),
                 cog_ready=_val_at(series.cog_ratio, ready, ready, p, "mean"),
                 cog_stable=None if cog_stable is None else round(cog_stable, 4),
@@ -595,6 +716,19 @@ def measure_swings(
                 shot_kind=shot_kind,
                 hit_point=hit_pt,
                 speeds=speeds,
+                elbow_takeback=elbow_tb,
+                elbow_follow=elbow_fl,
+                slot_drop=_r3(slot_drop),
+                takeback_height=_r3(takeback_height),
+                body_turn=_r3(body_turn),
+                wrist_back=_r3(wrist_back),
+                weight_shift=_r3(weight_shift),
+                torso_lean=_r3(torso_lean),
+                follow_forward=_r3(follow_forward),
+                follow_up=_r3(follow_up),
+                head_above_wrist=_r3(head_above_wrist),
+                takeback_dt=None if takeback_dt is None else round(takeback_dt, 3),
+                tech_flags=tech_flags,
             )
         )
     return out
@@ -603,7 +737,19 @@ def measure_swings(
 def summarize(swings: list[SwingMetrics], takeback_is_ratio: bool = False) -> dict:
     def mean(key):
         xs = [getattr(s, key) for s in swings if getattr(s, key) is not None]
-        digits = 3 if takeback_is_ratio and key == "takeback_extent" else 2
+        ratio_keys = {
+            "slot_drop",
+            "takeback_height",
+            "body_turn",
+            "wrist_back",
+            "weight_shift",
+            "torso_lean",
+            "follow_forward",
+            "follow_up",
+            "head_above_wrist",
+            "takeback_dt",
+        }
+        digits = 3 if key in ratio_keys or (takeback_is_ratio and key == "takeback_extent") else 2
         return None if not xs else round(float(np.mean(xs)), digits)
 
     tb = mean("takeback_extent")
@@ -625,6 +771,19 @@ def summarize(swings: list[SwingMetrics], takeback_is_ratio: bool = False) -> di
         "late_contact_rate": float(
             round(sum(1 for s in swings if s.late_contact) / max(len(swings), 1), 2)
         ),
+        "elbow_takeback_deg": mean("elbow_takeback"),
+        "elbow_follow_deg": mean("elbow_follow"),
+        "slot_drop": mean("slot_drop"),
+        "takeback_height": mean("takeback_height"),
+        "body_turn": mean("body_turn"),
+        "wrist_back": mean("wrist_back"),
+        "weight_shift": mean("weight_shift"),
+        "torso_lean": mean("torso_lean"),
+        "follow_forward": mean("follow_forward"),
+        "follow_up": mean("follow_up"),
+        "head_above_wrist": mean("head_above_wrist"),
+        "takeback_dt": mean("takeback_dt"),
+        "flag_rates": flag_rates([s.tech_flags for s in swings]),
         "speeds": mean_speeds([s.speeds for s in swings if s.speeds]),
         "swing_kmh": None,
         "hit_height": _mean_hit(swings, "height"),
@@ -694,7 +853,6 @@ def score_and_write(
     stable = summary.get("cog_stable")
     stance = summary.get("stance_ratio") or 1.2
     late = summary.get("late_contact_rate") or 0
-    elbow = summary.get("elbow_contact_deg")
     knee = summary.get("knee_contact_deg")
     speed = summary.get("racket_speed") or summary.get("wrist_speed") or 0
     forward = summary.get("contact_forward")
@@ -707,6 +865,8 @@ def score_and_write(
     feet_rate = summary.get("both_feet_off_rate") or 0
     step_rate = summary.get("early_step_rate") or 0
     height = summary.get("hit_height")
+    rates = summary.get("flag_rates") or {}
+    skip_generic_chain = float(rates.get("arm_only") or 0) >= 0.3
 
     # 重心 25：越低越好 + 越稳越好
     height_pts = float(np.clip(16 - (cog - 0.47) * 90, 4, 16))
@@ -773,6 +933,17 @@ def score_and_write(
     spin_pts = float(np.clip(spin_pts, 2, 10))
     effect_score = int(np.clip(round(speed_pts + spin_pts), 6, 25))
 
+    if float(rates.get("wipe_glass") or 0) >= 0.35:
+        effect_score = int(np.clip(effect_score - 3, 6, 25))
+    if float(rates.get("arm_only") or 0) >= 0.35:
+        chain_score = int(np.clip(chain_score - 4, 8, 30))
+    if float(rates.get("no_weight_shift") or 0) >= 0.4:
+        cog_score = int(np.clip(cog_score - 3, 6, 25))
+    if float(rates.get("follow_vertical") or 0) >= 0.4:
+        effect_score = int(np.clip(effect_score - 2, 6, 25))
+    if float(rates.get("elbow_range") or 0) >= 0.5:
+        chain_score = int(np.clip(chain_score - 2, 8, 30))
+
     scores = {
         "综合": int(cog_score + contact_score + chain_score + effect_score),
         "重心": cog_score,
@@ -781,7 +952,8 @@ def score_and_write(
         "击球效果": effect_score,
     }
 
-    strengths, problems, drills = [], [], []
+    extra_s, extra_p, extra_d = extra_findings(stroke, summary)
+    strengths, problems, drills = list(extra_s), list(extra_p), list(extra_d)
     if n >= 8:
         strengths.append(f"连续喂球下识别到约 {n} 次有效挥拍，动作重复性可用。")
     elif n >= 4:
@@ -844,7 +1016,9 @@ def score_and_write(
             "【问题】过早上步 → 【原因】急着去够下一拍 → 【训练】击球后先让拍从头上绕过对侧肩，落地停一拍再上步，12球×3组。"
         )
 
-    if chain is not None and chain < 0.55:
+    if skip_generic_chain:
+        pass
+    elif chain is not None and chain < 0.55:
         problems.append("动力链更像手臂主导：腕或肘先发力，髋肩没有先转，这是伤病高发模式。")
         drills.append(
             "【问题】动力链断裂 → 【原因】手上抢先发力 → 【训练】转体延迟引拍，轻球先转髋再挥臂，20×3 组；感觉肩比手更早动。"
@@ -893,8 +1067,6 @@ def score_and_write(
         drills.append(
             "【问题】步幅偏窄 → 【原因】准备站位收着 → 【训练】双脚踩在比肩宽一脚的标志线外准备，20次分腿垫步。"
         )
-    if elbow is not None:
-        strengths.append(f"击球附近持拍肘角大约 {elbow:.0f}°。")
 
     if not problems:
         problems.append("没有发现特别明显的问题，建议对照回放再确认击球点和拍面。")
@@ -909,6 +1081,7 @@ def score_and_write(
         "理想击球点：胸口高度、持拍一侧稍外侧、身前大约 45°。不判断球打在拍面哪里。单路录像看不到真实 3D，高度和左右/前后会受拍摄角度影响。",
         "旋转根据挥拍轨迹和拍面朝向估计，不是测球的转速。",
         "拍头、手腕、转髋和球速按画面里人体/球拍长度换算，是估算不是测速枪。侧面更接近真实，正面或斜切会偏慢。",
+        "掌心朝向、握拍和精确肘角无法从单路视频可靠测量。擦玻璃/拍凳子等判断结合挥拍下落轨迹和画面，受拍摄角度影响。",
     ]
 
     if stroke == "forehand_slice":
