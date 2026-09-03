@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import queue
 import shutil
 import sys
@@ -23,8 +24,10 @@ if str(ROOT) not in sys.path:
 from pipeline.cursor_client import warm_agent
 from pipeline.oss import refresh_report_urls
 from pipeline.session import analyze_video, get_detector, get_estimator, json_default
+from web.history import archive_report, find_archive, list_history
 
 JOBS_DIR = ROOT / "outputs" / "jobs"
+REPORTS_DIR = ROOT / "outputs" / "reports"
 SAMPLE_CACHE_DIR = ROOT / "outputs" / "sample_cache"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 SAMPLE_CANDIDATES = [
@@ -33,6 +36,7 @@ SAMPLE_CANDIDATES = [
 SAMPLE_CACHE_VERSION = "2.5-speeds"
 
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 SAMPLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 _jobs: dict[str, dict] = {}
@@ -233,6 +237,8 @@ def _recover_jobs() -> None:
         with _lock:
             _jobs[job_id] = job
             _write_status(job_id)
+        if job.get("status") == "done":
+            archive_report(job_dir, REPORTS_DIR)
         if job.get("is_sample") and job.get("status") == "done" and sample is not None:
             _save_sample_cache(job_id, sample, str(job.get("stroke_mode") or "auto"))
 
@@ -270,6 +276,7 @@ def _run_job(job_id: str) -> None:
             score=report["overall"]["score"],
             n_swings=report["overall"]["n_swings"],
         )
+        archive_report(out_dir, REPORTS_DIR)
         if job.get("is_sample"):
             src = _sample_path()
             if src is not None:
@@ -306,8 +313,23 @@ def _start_worker() -> None:
     _recover_jobs()
 
 
+def _archived_file(job_id: str, *names: str) -> Path | None:
+    arch = find_archive(REPORTS_DIR, job_id)
+    if arch is None:
+        return None
+    root = arch.resolve()
+    for name in names:
+        target = (root / name).resolve()
+        if root in target.parents and target.is_file():
+            return target
+    return None
+
+
 app = FastAPI(title="网球挥拍测评 2.0")
-_start_worker()
+if os.environ.get("TENNIS_AI_NO_WORKER") != "1":
+    _start_worker()
+else:
+    _recover_jobs()
 
 
 @app.get("/api/health")
@@ -378,6 +400,7 @@ async def analyze(
                     "updated_at": now,
                 }
                 _write_status(job_id)
+            archive_report(JOBS_DIR / job_id, REPORTS_DIR)
             return {"job_id": job_id, "cached": True}
 
     if _busy_job():
@@ -435,6 +458,20 @@ async def analyze(
     return {"job_id": job_id, "cached": False}
 
 
+@app.get("/api/history")
+def history():
+    items = list_history(JOBS_DIR, REPORTS_DIR)
+    for item in items:
+        job_dir = JOBS_DIR / item["id"]
+        if job_dir.is_dir():
+            archive_report(job_dir, REPORTS_DIR, item)
+    return {
+        "items": items,
+        "dir": str(REPORTS_DIR),
+        "count": len(items),
+    }
+
+
 @app.get("/api/jobs/{job_id}")
 def job_status(job_id: str):
     with _lock:
@@ -453,19 +490,31 @@ def job_status(job_id: str):
 @app.get("/api/jobs/{job_id}/preview")
 def job_preview(job_id: str):
     root = (JOBS_DIR / job_id).resolve()
-    target = (root / "preview.jpg").resolve()
-    if target.parent != root or not target.is_file():
-        raise HTTPException(404, "预览尚未生成")
-    return FileResponse(
-        target,
-        media_type="image/jpeg",
-        headers={"Cache-Control": "no-store"},
-    )
+    for name in ("preview.jpg", "cover.jpg"):
+        target = (root / name).resolve()
+        if target.parent != root or not target.is_file():
+            continue
+        return FileResponse(
+            target,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+    archived = _archived_file(job_id, "preview.jpg", "cover.jpg")
+    if archived is not None:
+        return FileResponse(
+            archived,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+    raise HTTPException(404, "预览尚未生成")
 
 
 @app.get("/api/jobs/{job_id}/report")
 def job_report(job_id: str):
     path = JOBS_DIR / job_id / "report.json"
+    if not path.exists():
+        archived = _archived_file(job_id, "report.json")
+        path = archived if archived is not None else path
     if not path.exists():
         raise HTTPException(404, "报告尚未生成")
     data = json.loads(path.read_text(encoding="utf-8"))

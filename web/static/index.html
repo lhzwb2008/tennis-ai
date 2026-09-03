@@ -107,6 +107,38 @@
     }
     .btn { cursor: pointer; }
     .hint { color: var(--muted); font-size: 12px; margin-top: 14px; }
+    .hist {
+      margin-top: 28px;
+    }
+    .hist-head {
+      display: flex; justify-content: space-between; gap: 16px; align-items: baseline;
+      margin-bottom: 12px;
+    }
+    .hist-head h2 { margin: 0; font-size: 18px; font-weight: 650; }
+    .hist-head p { margin: 0; color: var(--muted); font-size: 13px; }
+    .hist-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px;
+    }
+    .hist-card {
+      display: block; width: 100%; padding: 0; text-align: left; font: inherit; color: inherit;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 16px; overflow: hidden;
+      cursor: pointer; backdrop-filter: blur(12px);
+    }
+    .hist-card:hover { border-color: var(--ball); box-shadow: 0 0 18px rgba(212,225,87,.12); }
+    .hist-card .thumb {
+      width: 100%; aspect-ratio: 16/10; object-fit: cover; display: block; background: #0a120e;
+    }
+    .hist-card .body { padding: 12px 14px 14px; }
+    .hist-card .name {
+      font-size: 13px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .hist-card .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .hist-card .row-score {
+      display: flex; justify-content: space-between; align-items: baseline; margin-top: 8px; gap: 8px;
+    }
+    .hist-card .score { font-size: 22px; font-weight: 700; color: var(--ball); letter-spacing: -.03em; }
+    .hist-card .grade { font-size: 12px; color: var(--gold); }
+    .hist-empty { color: var(--muted); font-size: 13px; padding: 18px 4px; }
     .pillars { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 18px 0 0; }
     .pillar {
       text-align: left; padding: 12px 14px; border-radius: 14px;
@@ -243,10 +275,11 @@
       .cover, .scores, .grid2, .live, .steps, .phases, .pillars, .axis-grid, .speed-grid { grid-template-columns: 1fr 1fr; }
       .paper { padding: 22px 16px 32px; }
       header.hero { flex-direction: column; align-items: flex-start; }
+      .hist-grid { grid-template-columns: 1fr 1fr; }
       .steps { grid-template-columns: 1fr 1fr; }
     }
     @media (max-width: 560px) {
-      .pillars, .axis-grid, .phases, .speed-grid { grid-template-columns: 1fr; }
+      .pillars, .axis-grid, .phases, .speed-grid, .hist-grid { grid-template-columns: 1fr; }
     }
     @media print {
       body { background: white; }
@@ -266,7 +299,10 @@
         <h1>上传视频，生成挥拍测评报告</h1>
         <p class="sub">围绕重心、击球点、动力链和击球效果，找出每一次挥拍，给出评分和练习建议。</p>
       </div>
-      <button class="ghost" id="again" type="button" hidden>再分析一段</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+        <button class="ghost" id="hist-btn" type="button">历史报告</button>
+        <button class="ghost" id="again" type="button" hidden>再分析一段</button>
+      </div>
     </header>
 
     <section id="upload" class="no-print">
@@ -293,6 +329,13 @@
           <div class="pillar"><b>击球效果</b>看拍头速度（画面估算）和旋转轨迹</div>
         </div>
       </div>
+      <section class="hist" id="history">
+        <div class="hist-head">
+          <h2>历史报告</h2>
+          <p>每次分析都会保存在本机 <code>outputs/reports</code>，方便对比不同角度和画质。</p>
+        </div>
+        <div class="hist-grid" id="history-list"><p class="hist-empty">正在读取历史报告…</p></div>
+      </section>
     </section>
 
     <section id="analyzing" class="hidden no-print">
@@ -353,8 +396,87 @@
     }
 
     $("pick").onclick = () => file.click();
-    $("again").onclick = () => { clearJob(); location.reload(); };
+    $("again").onclick = () => goHome();
+    $("hist-btn").onclick = () => {
+      goHome();
+      const el = $("history");
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
     drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+
+    function goHome() {
+      clearJob();
+      reportEl.classList.add("hidden");
+      analyzing.classList.add("hidden");
+      upload.classList.remove("hidden");
+      $("again").hidden = true;
+      try { history.replaceState(null, "", location.pathname); } catch (e) {}
+      loadHistory();
+    }
+    window.goHome = goHome;
+
+    function fmtWhen(iso) {
+      if (!iso) return "";
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return iso;
+      const p = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+
+    async function loadHistory() {
+      const box = $("history-list");
+      if (!box) return;
+      try {
+        const res = await fetch("api/history");
+        if (!res.ok) throw new Error("bad");
+        const data = await res.json();
+        const items = data.items || [];
+        if (!items.length) {
+          box.innerHTML = `<p class="hist-empty">还没有历史报告。分析一段就会出现在这里，也会写入本机 outputs/reports。</p>`;
+          return;
+        }
+        box.innerHTML = items.map((it) => {
+          const score = it.score == null ? "—" : it.score;
+          const grade = [it.grade, it.grade_label].filter(Boolean).join(" · ");
+          const bits = [it.view_label, it.handedness_label, it.n_swings != null ? it.n_swings + " 拍" : ""].filter(Boolean);
+          const img = it.has_preview
+            ? `<img class="thumb" src="api/jobs/${encodeURIComponent(it.id)}/preview" alt="" />`
+            : `<div class="thumb"></div>`;
+          const sample = it.is_sample ? `<span class="pill ok">样例</span>` : "";
+          return `<button class="hist-card" type="button" data-id="${esc(it.id)}">
+            ${img}
+            <div class="body">
+              <div class="name">${esc(it.source_name || it.title || it.id)} ${sample}</div>
+              <div class="meta">${esc(bits.join(" · "))}</div>
+              <div class="row-score"><span class="score">${esc(score)}</span><span class="grade">${esc(grade)}</span></div>
+              <div class="meta">${esc(fmtWhen(it.created_at))}</div>
+            </div>
+          </button>`;
+        }).join("");
+        box.querySelectorAll(".hist-card").forEach((btn) => {
+          btn.onclick = () => openHistory(btn.dataset.id);
+        });
+      } catch (e) {
+        box.innerHTML = `<p class="hist-empty">暂时读不到历史报告。</p>`;
+      }
+    }
+
+    async function openHistory(id) {
+      if (!id) return false;
+      const r = await fetch("api/jobs/" + encodeURIComponent(id) + "/report");
+      if (!r.ok) return false;
+      try {
+        showReport(await r.json(), id);
+        return true;
+      } catch (e) {
+        reportEl.classList.remove("hidden");
+        upload.classList.add("hidden");
+        analyzing.classList.add("hidden");
+        $("again").hidden = false;
+        reportEl.innerHTML = `<div class="actions no-print"><button class="btn" type="button" onclick="window.goHome()">返回列表</button></div><p class="sub">这份报告打不开，请返回列表再试，或重新分析。</p>`;
+        return false;
+      }
+    }
     drop.ondragleave = () => drop.classList.remove("over");
     drop.ondrop = (e) => {
       e.preventDefault(); drop.classList.remove("over");
@@ -405,7 +527,8 @@
         analyzing.classList.add("hidden");
         const r = await fetch("api/jobs/" + job_id + "/report");
         const data = await r.json();
-        showReport(data);
+        showReport(data, job_id);
+        loadHistory();
         return;
       }
       saveJob(job_id);
@@ -446,7 +569,8 @@
         clearJob();
         const r = await fetch("api/jobs/" + id + "/report");
         const data = await r.json();
-        showReport(data);
+        showReport(data, id);
+        loadHistory();
         return;
       }
       if (job.status === "error" || job.status === "cancelled") {
@@ -490,7 +614,7 @@
 
     function chart(series, swings) {
       const w = 640, h = 150, pad = 18;
-      const ys = (series.wrist_speed || []).map((v) => v == null ? 0 : v);
+      const ys = ((series && series.wrist_speed) || []).map((v) => v == null ? 0 : v);
       if (!ys.length) return "<p class='note'>没有挥拍节奏数据</p>";
       const max = Math.max(...ys, 1);
       const xs = series.t;
@@ -626,12 +750,17 @@
         <p class="legend">击球画面里：<b>实心十字</b>是相对身体的击球点，<i>虚线圈</i>是理想区（胸口高度、持拍侧稍外、身前约 45°）。不判断球打在拍面哪里。</p>`;
     }
 
-    function showReport(data) {
+    function showReport(data, jobId) {
       analyzing.classList.add("hidden");
+      upload.classList.add("hidden");
       reportEl.classList.remove("hidden");
       $("again").hidden = false;
-      const o = data.overall;
-      const sc = o.scores;
+      if (jobId) {
+        try { history.replaceState(null, "", "?job=" + encodeURIComponent(jobId)); } catch (e) {}
+      }
+      const o = data.overall || {};
+      const sc = o.scores || {};
+      const clips = Array.isArray(data.clips) ? data.clips : [];
       const tiles = AXES.map(([k, max]) => {
         const v = sc[k] || 0;
         return `<div class="axis"><div class="lab">${k} / ${max}</div><div class="val">${v}</div>
@@ -645,6 +774,7 @@
       let cur = 0;
       reportEl.innerHTML = `
         <div class="actions no-print">
+          <button class="btn" type="button" onclick="window.goHome()">返回列表</button>
           <button class="btn" type="button" onclick="window.rerunSample()">重新跑样例</button>
           <button class="btn" type="button" onclick="window.print()">导出 / 打印报告</button>
         </div>
@@ -681,7 +811,7 @@
             <h3>全程挥拍节奏</h3>
             ${chart(data.series, data.timeline)}
           </div>
-          <div class="tabs" id="tabs">${data.clips.map((c,i) =>
+          <div class="tabs" id="tabs">${clips.map((c,i) =>
             `<button class="tab ${i===0?"on":""}" data-i="${i}" type="button">${esc(c.label)} · ${c.summary.n_swings} 拍 · ${c.scores["综合"]}分</button>`
           ).join("")}</div>
           <div id="clip"></div>
@@ -694,11 +824,11 @@
       });
       const clipBox = reportEl.querySelector("#clip");
       const paint = () => {
-        if (!data.clips.length) {
+        if (!clips.length) {
           clipBox.innerHTML = "<p>没有识别到完整挥拍。</p>";
           return;
         }
-        clipBox.innerHTML = renderClip(data.clips[cur]);
+        clipBox.innerHTML = renderClip(clips[cur]);
         reportEl.querySelectorAll(".tab").forEach((b) => {
           b.classList.toggle("on", +b.dataset.i === cur);
           b.onclick = () => { cur = +b.dataset.i; paint(); };
@@ -707,7 +837,14 @@
       paint();
     }
 
-    (async function resumeJob() {
+    (async function boot() {
+      loadHistory();
+      const params = new URLSearchParams(location.search);
+      const fromUrl = params.get("job");
+      if (fromUrl) {
+        const ok = await openHistory(fromUrl);
+        if (ok) return;
+      }
       let id = "";
       try { id = localStorage.getItem(JOB_KEY) || ""; } catch (e) {}
       if (!id) return;
@@ -718,7 +855,7 @@
         const r = await fetch("api/jobs/" + id + "/report");
         if (!r.ok) { clearJob(); return; }
         upload.classList.add("hidden");
-        showReport(await r.json());
+        showReport(await r.json(), id);
         clearJob();
         return;
       }
