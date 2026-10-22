@@ -10,9 +10,8 @@ from pathlib import Path
 from typing import Callable
 
 from pipeline.analyze import SCORE_AXES, grade_from_score
-from pipeline.level import parse_level
+from pipeline.level import level_context, parse_level
 from pipeline.cursor_client import available, model_id, model_params, run_with_stream, start_prompt
-from pipeline.technique import prompt_knowledge
 
 ProgressCb = Callable[[dict], None]
 
@@ -124,94 +123,67 @@ def _pick_keyframes(clips: list[dict], kf_dir: Path, limit: int = 5) -> list[tup
     return picks
 
 
-_SWING_KEYS = (
-    "index",
-    "contact_t",
-    "shot_kind",
-    "late_contact",
-    "contact_forward",
-    "hit_point",
-    "cog_stable",
-    "chain_order",
-    "racket_speed",
-    "speeds",
-    "path_lift",
-    "cog_ratio",
-    "knee_deg",
-    "contact_source",
-    "elbow_deg",
-    "elbow_takeback_deg",
-    "elbow_follow_deg",
-    "takeback_ratio",
-    "stance_ratio",
-    "slot_drop",
-    "body_turn",
-    "weight_shift",
-    "follow_forward",
-    "follow_up",
-    "takeback_dt",
-    "tech_flags",
-    "flag_notes",
-)
+def _seen_hit(hit: dict | None) -> dict | None:
+    if not isinstance(hit, dict):
+        return None
+    seen = []
+    for key in ("summary", "height_label", "side_label", "forward_label"):
+        text = str(hit.get(key) or "").strip()
+        if text and "看不清" not in text and text not in seen:
+            seen.append(text)
+    extra = []
+    if hit.get("hand_reaches"):
+        extra.append("空着的手伸向来球")
+    if hit.get("both_feet_off"):
+        extra.append("击球时双脚离地")
+    if hit.get("early_step"):
+        extra.append("随挥未结束就上步")
+    if not seen and not extra:
+        return None
+    out = {}
+    if seen:
+        out["位置"] = seen
+    if extra:
+        out["另外"] = extra
+    return out
 
-_METRIC_KEYS = (
-    "n_swings",
-    "elbow_contact_deg",
-    "elbow_takeback_deg",
-    "elbow_follow_deg",
-    "knee_contact_deg",
-    "cog_ratio",
-    "cog_stable",
-    "stance_ratio",
-    "takeback_ratio",
-    "late_contact_rate",
-    "chain_order",
-    "path_lift",
-    "slot_drop",
-    "body_turn",
-    "weight_shift",
-    "follow_forward",
-    "follow_up",
-    "flag_rates",
-    "hit_height",
-    "shoulder_aim",
-    "hand_reaches_rate",
-    "both_feet_off_rate",
-    "early_step_rate",
-)
+
+def _slim_swing(swing: dict) -> dict:
+    notes = [str(x).strip() for x in (swing.get("flag_notes") or []) if str(x).strip()]
+    item = {
+        "index": swing.get("index"),
+        "contact_t": swing.get("contact_t"),
+        "shot_kind": swing.get("shot_kind"),
+        "late_contact": bool(swing.get("late_contact")),
+    }
+    hit = _seen_hit(swing.get("hit_point") if isinstance(swing.get("hit_point"), dict) else None)
+    if hit:
+        item["hit"] = hit
+    if notes:
+        item["notes"] = notes[:4]
+    return item
 
 
 def _slim_report(report: dict) -> dict:
     clips = []
     for c in report.get("clips") or []:
-        swings = []
-        for s in (c.get("swings") or [])[:6]:
-            swings.append({k: s.get(k) for k in _SWING_KEYS})
-        analysis = c.get("analysis") or {}
         summary = c.get("summary") or {}
         clips.append(
             {
                 "id": c.get("id"),
                 "label": c.get("label"),
                 "hitting_arm": c.get("hitting_arm"),
-                "metrics": {k: summary.get(k) for k in _METRIC_KEYS},
-                "scores_rule": c.get("scores"),
-                "rule_hints": {
-                    "strengths": (analysis.get("strengths") or [])[:5],
-                    "problems": (analysis.get("problems") or [])[:6],
-                },
-                "swings": swings,
+                "n_swings": summary.get("n_swings"),
+                "swings": [_slim_swing(s) for s in (c.get("swings") or [])[:6]],
             }
         )
+    overall = report.get("overall") or {}
     return {
-        "player_level": report.get("player_level"),
-        "player_level_label": report.get("player_level_label"),
+        "player_level": report.get("player_level_label") or report.get("player_level"),
         "view": report.get("view_label"),
         "handedness": report.get("handedness_label"),
         "duration_s": report.get("duration_s"),
-        "detect_rate": report.get("detect_rate"),
-        "rule_overall": report.get("overall"),
-        "shot_mix": (report.get("overall") or {}).get("shot_mix") or {},
+        "shot_mix": overall.get("shot_mix") or {},
         "clips": clips,
     }
 
@@ -220,61 +192,46 @@ def _build_prompt(report: dict, captions: list[str]) -> str:
     payload = json.dumps(_slim_report(report), ensure_ascii=False, indent=2)
     caps = "\n".join(f"- 图片{i+1}: {c}" for i, c in enumerate(captions)) or "（无附图）"
     ids = "、".join(c.get("id") or "" for c in report.get("clips") or []) or "forehand"
-    handed = report.get("handedness") or "right"
     level = parse_level(report.get("player_level"))
-    knowledge = prompt_knowledge(
-        [c.get("id") or "" for c in report.get("clips") or []],
-        handed,
-        player_level=level.code,
-    )
-    return f"""你是有执教经验的网球私教，写一份给认真练球的球友看的深度点评。不要改文件、不要跑命令、不要读仓库。
+    context = level_context(level)
+    return f"""你是网球私教。看着这几张挥拍画面，用你自己的话写一份点评。不要改文件、不要跑命令、不要读仓库。
 
-球员自己选的等级是 {level.label}。下面所有解释和训练必须按这个等级写，不要另估水平，也不要套别的等级的话术。
+{context}
 
 附图：
 {caps}
 
-{knowledge}
-
-【判断动作，不要想当然】
-- shot_mix 和 clips.id 是测量结果。没有 backhand 就不要写反手。
-- 按底线正手或反手来写。看不清就跳过那一条，不要写拍摄要求和评价范围。
-- 重心要拆开写：偏高（直立挡球）和不稳定（击球时头肩上下晃）可以同时存在，不要只写其中一个。
-- 对照画面说具体现象（哪类球、准备/引拍/击球/随挥），不要空泛的「继续努力」。
-- 击球点看 hit_point：只谈相对身体的位置（胸口高度、持拍一侧稍外、身前大约 45°）。用「高了/低了、偏左/偏右、偏前/偏晚」说话。不要写球拍甜区、拍框、拍柄，也不要判断球打在拍面哪里。
-- 准备时对准来球的是前肩（右手持拍是左肩），不是前手。禁止写「左手指向来球」当优点。
-- 击球瞬间不能双脚同时离地（后脚脚尖点地可以）。随挥过肩之后才能上步。
-- 用短句、大白话。少用「动力链」「加载」这种词，改成「腰先转、手后到」「先蹲再打」。
-- speeds 里的 *_kmh 是画面比例估算（拍头、手腕、转髋、来球、出球），单位公里每小时。可以写「拍头大约 xx」，不要写成测速雷达，不要和职业球员雷达数据硬比。没有数字就不要编。
-- 钟表方向（掌心 6:00 等）是教练口令，单路视频通常看不准。能看清手腕/前臂就写「拍头偏后下方」或「拍面朝侧面」；看不清不要编钟点。
-- 擦玻璃 vs 拍凳子：看引拍结束后球拍有没有先由高往低落到腰再向前，以及球是否往天上飞。slot_drop / tech_flags 是旁证，要和附图对照。
-- rule_hints 和 tech_flags 是测量层已经抓到的点，必须写进点评，不要只反复写「重心」「击球点」两句空话。对照技术清单把准备、引拍、击球、随挥都点到。
-- 不要把同一句换说法凑数。画面和测量都看不清的细节不要编。
-
-【四维满分】重心 25、击球点 20、动力链 30、击球效果 25。分数可按画面微调，不要编造没出现的动作。
-
-【写深一点】
-- summary 160–220 字：先点最大亮点，再写两个最要紧的问题，带一点因果。用清单里的说法（擦玻璃、拍凳子、前肩对球），但必须结合这次测量和画面。
-- focus：这次练球最该抓的一件事，40 字以内。
-- improvements：3 条可执行训练，写清口令、组数和过关标准。
-- 每个 clip 的 strengths 2–3 条；problems 3–5 条，至少覆盖引拍和击球两段；drills 3 条，用「【问题】… → 【原因】… → 【训练】…」。
+【怎么写】
+- 以画面为准。下面的 JSON 只说明正手还是反手、大概打在身前还是偏晚，不是要你照抄的稿子。画面和它不一致时，信画面。
+- 没有 backhand 就不要写反手。看不清的细节直接跳过，不要编。
+- 这是单机位录像，看不到完整三维。不要写角度、肘角、膝角、步幅比例、公里每小时、百分比、钟点。这些数字从侧面或背面推出来往往不准，写出来会被质疑。
+- 用能看出来的现象说话：人站得高不高、击球在身前还是贴着身体、引拍有没有转开、随挥是送出去还是往上拎。不要判断球打在拍面哪里。
+- 用短句、大白话。不要套固定口令和固定组数，也不要把同一句话换个说法凑条数。
 - 只点评这些 clip id：{ids}
 
-【测量 JSON】
+【四维满分】重心 25、击球点 20、动力链 30、击球效果 25。按这次画面的完成度打分。
+
+【篇幅】
+- summary 120–180 字：先说这次最明显的一点，再写一两个真正值得改的地方，带上你看到的原因。
+- focus：这次最该抓的一件事，40 字以内。
+- improvements：2–3 条，按这个人的水平写怎么练。
+- 每个 clip：strengths 2 条左右，problems 2–4 条，drills 2–3 条。
+
+【参考】
 {payload}
 
 只输出 JSON：
 {{
   "summary": "总评",
   "focus": "本次最该改的一件事",
-  "improvements": ["【问题】… → 【原因】… → 【训练】…"],
+  "improvements": ["怎么练"],
   "scores": {{"综合": 0-100整数, "重心": 0-25, "击球点": 0-20, "动力链": 0-30, "击球效果": 0-25}},
   "clips": [
     {{
       "id": "{ids.split('、')[0]}",
       "strengths": ["优点"],
       "problems": ["问题"],
-      "drills": ["【问题】… → 【原因】… → 【训练】…"],
+      "drills": ["怎么练"],
       "scores": {{"综合": 整数, "重心": 整数, "击球点": 整数, "动力链": 整数, "击球效果": 整数}}
     }}
   ]

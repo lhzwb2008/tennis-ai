@@ -13,7 +13,7 @@ from pipeline.analyze import infer_view, score_and_write, swing_clip_span, view_
 from pipeline.coach import _build_prompt, _pick_keyframes, _slim_report
 from pipeline.oss import refresh_report_urls
 from pipeline.pose import KPT
-from pipeline.technique import extra_findings, flags_from_values, prompt_knowledge
+from pipeline.technique import extra_findings, flags_from_values
 
 
 class FlagTests(unittest.TestCase):
@@ -77,8 +77,9 @@ class FindingsTests(unittest.TestCase):
             {"flag_rates": {"wipe_glass": 0.6}, "slot_drop": 0.02},
         )
         blob = " ".join(problems + drills)
-        self.assertIn("擦玻璃", blob)
-        self.assertIn("拍凳子", blob)
+        self.assertIn("横着扫", blob)
+        self.assertNotIn("°", blob)
+        self.assertEqual(drills, [])
 
     def test_score_and_write_surfaces_coach_errors(self):
         base = score_and_write("forehand", {"n_swings": 8, "cog_ratio": 0.5, "flag_rates": {}})
@@ -92,9 +93,11 @@ class FindingsTests(unittest.TestCase):
                 "body_turn": 0.01,
             },
         )
-        text = " ".join(written["problems"] + written["drills"])
-        self.assertIn("擦玻璃", text)
-        self.assertIn("只动手不转体", text)
+        text = " ".join(written["problems"] + written["drills"] + written["strengths"])
+        self.assertIn("横着扫", text)
+        self.assertIn("手在动", text)
+        self.assertNotIn("km/h", text)
+        self.assertNotIn("°", text)
         self.assertLess(written["scores"]["击球效果"], base["scores"]["击球效果"])
         self.assertLess(written["scores"]["动力链"], base["scores"]["动力链"])
 
@@ -109,7 +112,7 @@ class FindingsTests(unittest.TestCase):
             view="back",
         )
         blob = " ".join(written["problems"] + written["drills"] + written["strengths"])
-        self.assertIn("重心", blob)
+        self.assertIn("站得偏高", blob)
         self.assertNotIn("不下判断", blob)
         self.assertNotIn("评价范围", blob)
 
@@ -125,23 +128,9 @@ class FindingsTests(unittest.TestCase):
 
 
 class PromptTests(unittest.TestCase):
-    def test_knowledge_covers_forehand_and_limits(self):
-        text = prompt_knowledge(["forehand"], "right")
-        self.assertIn("拍凳子", text)
-        self.assertIn("擦玻璃", text)
-        self.assertIn("左肩", text)
-        self.assertIn("不要编 6:00", text)
-        self.assertIn("底线正手", text)
-        self.assertNotIn("截击正手", text)
-        self.assertNotIn("高压：", text)
-        self.assertNotIn("只评正侧面", text)
-
-    def test_lefty_swaps_front_shoulder(self):
-        text = prompt_knowledge(["forehand"], "left")
-        self.assertIn("右肩对准来球", text)
-
-    def test_build_prompt_includes_checklist_and_hints(self):
+    def test_build_prompt_trusts_the_picture(self):
         report = {
+            "player_level": "3.0",
             "handedness": "right",
             "handedness_label": "右手持拍",
             "view_label": "侧面",
@@ -151,15 +140,8 @@ class PromptTests(unittest.TestCase):
                     "label": "底线正手",
                     "hitting_arm": "right",
                     "scores": {"综合": 70, "重心": 18, "击球点": 14, "动力链": 20, "击球效果": 18},
-                    "analysis": {
-                        "strengths": ["引拍完整"],
-                        "problems": ["擦玻璃：引拍后没有由高往低落入击球槽"],
-                    },
-                    "summary": {
-                        "n_swings": 6,
-                        "flag_rates": {"wipe_glass": 0.5},
-                        "slot_drop": 0.02,
-                    },
+                    "analysis": {"problems": ["这句规则稿不该进提示词"]},
+                    "summary": {"n_swings": 6, "elbow_contact_deg": 140},
                     "swings": [
                         {
                             "index": 1,
@@ -167,7 +149,7 @@ class PromptTests(unittest.TestCase):
                             "shot_kind": "topspin",
                             "tech_flags": ["wipe_glass"],
                             "flag_notes": ["擦玻璃倾向"],
-                            "slot_drop": 0.02,
+                            "elbow_deg": 140,
                         }
                     ],
                 }
@@ -175,13 +157,14 @@ class PromptTests(unittest.TestCase):
             "overall": {"shot_mix": {"forehand": 6}},
         }
         prompt = _build_prompt(report, ["底线正手 挥拍#1 引拍 t=1.2"])
-        self.assertIn("拍凳子", prompt)
-        self.assertIn("rule_hints", prompt)
-        self.assertIn("wipe_glass", prompt)
+        self.assertIn("以画面为准", prompt)
+        self.assertIn("不要写角度", prompt)
         self.assertIn("3.0 进阶初级", prompt)
+        self.assertNotIn("rule_hints", prompt)
+        self.assertNotIn("这句规则稿", prompt)
         slim = _slim_report(report)
-        self.assertEqual(slim["clips"][0]["rule_hints"]["problems"][0][:3], "擦玻璃")
-        self.assertEqual(slim["clips"][0]["swings"][0]["tech_flags"], ["wipe_glass"])
+        self.assertNotIn("elbow", str(slim))
+        self.assertEqual(slim["clips"][0]["swings"][0]["notes"], ["擦玻璃倾向"])
 
     def test_pick_keyframes_prefers_full_cycle(self):
         with tempfile.TemporaryDirectory() as raw:

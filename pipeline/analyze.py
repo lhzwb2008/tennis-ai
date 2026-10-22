@@ -8,7 +8,7 @@ import numpy as np
 
 from pipeline.contact import HitPoint, measure_hit_point, racket_head_xy, refine_contact_index, score_hit_point
 from pipeline.pose import KPT
-from pipeline.level import issue_text, level_caveat, parse_level, trim_coaching
+from pipeline.level import level_caveat, parse_level
 from pipeline.technique import extra_findings, flag_rates, flags_from_values
 from pipeline.speed import (
     ball_track_xy,
@@ -892,14 +892,6 @@ def _takeback_tier(summary: dict) -> str:
     return "shallow"
 
 
-def _push_issue(problems: list[str], drills: list[str], issue: str, level, **kwargs) -> None:
-    problem, drill = issue_text(issue, level, **kwargs)
-    if problem:
-        problems.append(problem)
-    if drill:
-        drills.append(drill)
-
-
 def score_and_write(
     stroke: str,
     summary: dict,
@@ -923,7 +915,6 @@ def score_and_write(
     lift = summary.get("path_lift")
     face = summary.get("face_vert")
     tb_tier = _takeback_tier(summary)
-    ratio = summary.get("takeback_ratio")
     hand_rate = summary.get("hand_reaches_rate") or 0
     feet_rate = summary.get("both_feet_off_rate") or 0
     step_rate = summary.get("early_step_rate") or 0
@@ -948,7 +939,7 @@ def score_and_write(
         stab_pts = min(stab_pts, 4)
     cog_score = int(np.clip(round(height_pts + stab_pts), 6, 25))
 
-    # 击球点 20：胸口高度 + 持拍侧稍外 / 身前约 45°
+    # 击球点 20：胸口附近、持拍侧稍外、在身前
     if hits:
         contact_pts = score_hit_point(hits, view, late)
     elif forward is None:
@@ -1015,94 +1006,70 @@ def score_and_write(
         "击球效果": effect_score,
     }
 
-    extra_s, extra_p, extra_d = extra_findings(stroke, summary, player_level=level.code)
-    strengths, problems, drills = list(extra_s), list(extra_p), list(extra_d)
+    extra_s, extra_p, _extra_d = extra_findings(stroke, summary)
+    strengths, problems = list(extra_s), list(extra_p)
+    drills: list[str] = []
     if n >= 8:
-        strengths.append(f"连续喂球下识别到约 {n} 次有效挥拍，动作重复性可用。")
+        strengths.append(f"这段录像里能看出大约 {n} 次挥拍。")
     elif n >= 4:
-        strengths.append(f"识别到 {n} 次挥拍，样本偏少，结论按趋势看即可。")
+        strengths.append(f"这段录像里能看出 {n} 次挥拍，样本不多，结论按趋势看。")
     else:
-        problems.append("有效挥拍样本过少，以下判断置信度偏低。")
+        problems.append("看清的挥拍不多，判断只作参考。")
 
     view_word = view_label(view)
     if stroke == "backhand":
-        strengths.append(f"{view_word}能看到双手反手结构：非持拍手同步参与，不是单手挡球。")
+        strengths.append(f"{view_word}能看到双手反手，不是单手挡球。")
+    elif tb_tier == "shallow":
+        problems.append("引拍偏浅，拍没有充分带到身后。")
     else:
-        if tb_tier != "shallow":
-            extra = f"（引拍幅度 / 身高比例 ≈ {ratio:.2f}）" if ratio is not None else ""
-            strengths.append(f"{view_word}能看到完整引拍{extra}，不是完全直臂推挡。")
-        else:
-            problem, _ = issue_text("takeback_shallow", level)
-            if problem:
-                problems.append(problem)
+        strengths.append(f"{view_word}能看到比较完整的引拍。")
 
     if cog >= 0.56 or (knee is not None and knee > 155):
-        _push_issue(problems, drills, "cog_high", level)
+        problems.append("准备和击球时人站得偏高。")
     if stable is not None and stable > 0.06:
-        _push_issue(problems, drills, "cog_unstable", level)
+        problems.append("击球前后头肩起伏比较明显。")
     if not any("重心" in p or "站得" in p or "头肩" in p for p in problems):
-        strengths.append("重心高度和稳定性尚可，没有明显直立挡球。")
+        strengths.append("重心看起来还算稳，没有明显一直站得很直。")
 
     if (forward is not None and forward < 0.06) or late >= 0.4:
-        _push_issue(problems, drills, "late_contact", level, late_pct=int(late * 100))
+        problems.append("有些球打得偏晚，贴在身体旁边。")
     elif forward is not None and 0.10 <= forward <= 0.42:
-        strengths.append("击球点总体在身前，没有明显挤在身上。")
+        strengths.append("击球点大体在身前。")
     if height is not None and height < -0.16:
-        _push_issue(problems, drills, "contact_low", level)
+        problems.append("有些球掉得比较低才打到。")
     elif height is not None and height > 0.18:
-        _push_issue(problems, drills, "contact_high", level)
+        problems.append("有些球打得偏高。")
     if hand_rate >= 0.3:
-        _push_issue(problems, drills, "hand_reach", level)
+        problems.append("空着的那只手伸向来球了。")
     if feet_rate >= 0.25:
-        _push_issue(problems, drills, "both_feet_off", level)
+        problems.append("击球时两只脚有一起离地。")
     if step_rate >= 0.25:
-        _push_issue(problems, drills, "early_step", level)
+        problems.append("这一拍还没送完，人已经迈出去了。")
 
     if skip_generic_chain:
         pass
     elif chain is not None and chain < 0.55:
-        _push_issue(problems, drills, "chain_break", level)
+        problems.append("发力看起来手偏早，身体还没转开。")
     elif stroke == "forehand" and tb_tier != "good":
-        _push_issue(problems, drills, "takeback_shallow", level)
+        problems.append("转体和后摆还不够，手的成分偏多。")
     elif chain is not None and chain >= 0.75:
-        strengths.append("发力顺序比较合理：身体先动，手臂后到。")
-
-    kmh = summary.get("swing_kmh")
-    kmh_note = "" if kmh is None else f"（拍头大约 {kmh:.0f} km/h，画面估算）"
-    if speed < 180:
-        _push_issue(problems, drills, "speed_slow", level, kmh_note=kmh_note)
-    elif speed >= 260:
-        strengths.append(f"挥拍速度够用，能打出一定质量的球。{kmh_note}")
-    elif kmh is not None:
-        strengths.append(f"拍头大约 {kmh:.0f} km/h（按画面估算，不是测速枪）。")
-
-    ball_out = (summary.get("speeds") or {}).get("ball_out_kmh")
-    if ball_out is not None and ball_out >= 25:
-        strengths.append(f"出球大约 {ball_out:.0f} km/h（画面估算）。")
+        strengths.append("发力看起来是身体先动，手后到。")
 
     if lift is not None and 0.2 <= lift <= 0.7:
-        strengths.append("挥拍有低向高的轨迹，有利于打出上旋。")
+        strengths.append("挥拍有从低到高的轨迹。")
     elif lift is not None and lift < 0.08:
-        _push_issue(problems, drills, "path_flat", level)
+        problems.append("挥拍轨迹偏平。")
 
     if stance < 1.25:
-        _push_issue(problems, drills, "stance_narrow", level)
+        problems.append("准备时两脚偏窄。")
 
-    strengths, problems, drills = trim_coaching(level, strengths, problems, drills)
     if not problems:
-        problems.append("没有发现特别明显的问题，建议对照回放再确认击球点和拍面。")
-    if not drills:
-        drills.append("保持当前框架，增加不同落点的移动击球，再复测重心稳定和击球点。")
+        problems.append("画面上没有特别扎眼的问题，可以再对一下回放。")
 
     caveats = [
         "本报告根据训练录像自动生成，仅供练习参考，不能替代现场教练。",
-        "拍摄角度会影响判断：背面录像较难看清击球点前后位置和拍面开合。",
-        "评分来自画面，距离和角度会有一定误差。",
-        "能看到球或球拍时，击球画面按球和拍的距离选取。挥拍附近会再放大球员区域检测一次，并标出相对身体的击球点（实心圈）和理想区（虚线圈）。",
-        "理想击球点：胸口高度、持拍一侧稍外侧、身前大约 45°。不判断球打在拍面哪里。单路录像看不到真实 3D，高度和左右/前后会受拍摄角度影响。",
-        "旋转根据挥拍轨迹和拍面朝向估计，不是测球的转速。",
-        "拍头、手腕、转髋和球速按画面里人体/球拍长度换算，是估算不是测速枪。侧面更接近真实，正面会偏慢。",
-        "掌心朝向、握拍和精确肘角无法从单路视频可靠测量。擦玻璃/拍凳子等判断结合挥拍下落轨迹和画面，受拍摄角度影响。",
+        "只有一个机位，看不到完整的三维动作。看不清的角度、步幅和速度不会写成具体数字。",
+        "击球画面标出的是相对身体的大致位置，不判断球打在拍面哪里。",
         level_caveat(level),
     ]
 

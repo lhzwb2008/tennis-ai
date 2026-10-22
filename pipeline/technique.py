@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from collections import Counter
 
-from pipeline.level import issue_text, parse_level, prompt_level_block
 
 # 2D 投影会偏，只把明显越界当旁证。
 ELBOW_RANGES = {
@@ -32,7 +31,6 @@ FLAG_SHORT = {
     "lean_back": "击球后仰",
     "follow_vertical": "随挥垂直上收",
     "follow_too_high": "反手收拍过高",
-    "elbow_range": "肘角偏差大",
     "head_below_wrist": "拍头低于手腕",
 }
 
@@ -142,139 +140,50 @@ def flag_notes(flags: list[str]) -> list[str]:
     return [FLAG_SHORT[f] for f in flags if f in FLAG_SHORT]
 
 
-def _push_issue(problems: list[str], drills: list[str], issue: str, level, **kwargs) -> None:
-    problem, drill = issue_text(issue, level, **kwargs)
-    if problem:
-        problems.append(problem)
-    if drill:
-        drills.append(drill)
-
-
 def extra_findings(
     stroke: str,
     summary: dict,
     player_level: str = "3.0",
 ) -> tuple[list[str], list[str], list[str]]:
-    """Stroke-specific lines for the rule layer (also passed to the LLM as hints)."""
+    """Short qualitative notes. The written report comes from the model, not these lines."""
+    del player_level
     kind = normalize_kind(stroke)
-    level = parse_level(player_level)
     rates = summary.get("flag_rates") or {}
     strengths: list[str] = []
     problems: list[str] = []
-    drills: list[str] = []
 
     def rate(key: str) -> float:
         return float(rates.get(key) or 0.0)
 
     if kind == "forehand":
         if rate("wipe_glass") >= 0.3:
-            _push_issue(problems, drills, "wipe_glass", level)
+            problems.append("引拍之后球拍横着扫，不太像先落下来再往前送。")
         elif (summary.get("slot_drop") or 0) >= 0.08:
-            strengths.append("引拍后能看到由高往低落入击球槽，不是横着擦玻璃。")
+            strengths.append("引拍后能看到球拍先落下来再往前送。")
 
     if rate("arm_only") >= 0.3:
-        _push_issue(problems, drills, "arm_only", level)
+        problems.append("拉拍时主要是手在动，身体转开得不多。")
     elif (summary.get("body_turn") or 0) >= 0.08:
-        strengths.append("引拍能看到转体，不是只甩胳膊。")
+        strengths.append("引拍能看到身体跟着转，不是只甩胳膊。")
 
     if rate("no_weight_shift") >= 0.35:
-        _push_issue(problems, drills, "no_weight_shift", level)
+        problems.append("击球时人几乎留在后面，没有往前送。")
     elif (summary.get("weight_shift") or 0) >= 0.05:
-        strengths.append("击球时髋能向前送，不是钉在原地。")
+        strengths.append("击球时人能往前送，不是钉在原地。")
 
     if rate("late_takeback") >= 0.35:
-        _push_issue(problems, drills, "late_takeback", level)
+        problems.append("引拍完成偏晚，球挤上来才动手。")
 
     if rate("lean_back") >= 0.3:
-        _push_issue(problems, drills, "lean_back", level)
+        problems.append("击球时身体有后仰。")
 
     if rate("follow_vertical") >= 0.3:
-        _push_issue(problems, drills, "follow_vertical", level)
+        problems.append("随挥更像往上拎，而不是向前送出去。")
 
     if kind == "backhand" and rate("follow_too_high") >= 0.3:
-        _push_issue(problems, drills, "follow_too_high", level)
+        problems.append("反手随挥收得偏高。")
 
     if rate("head_below_wrist") >= 0.35:
-        _push_issue(problems, drills, "head_below_wrist", level)
+        problems.append("引拍时拍头掉到手腕下面。")
 
-    elbow = summary.get("elbow_contact_deg")
-    spec = ELBOW_RANGES.get(kind) or ELBOW_RANGES["forehand"]
-    lo, hi = spec["contact"]
-    if elbow is not None:
-        if lo - 10 <= elbow <= hi + 10:
-            strengths.append(f"击球肘角大约 {elbow:.0f}°，落在该技术常见范围（{lo}–{hi}°）。")
-        elif rate("elbow_range") >= 0.4 or elbow < lo - 22 or elbow > hi + 22:
-            problems.append(
-                f"击球肘角大约 {elbow:.0f}°，和该技术常见范围 {lo}–{hi}° 差得比较多（2D 估算，只作参考）。"
-            )
-
-    return strengths, problems, drills
-
-
-def _side_words(handed: str) -> dict[str, str]:
-    if handed == "left":
-        return {
-            "front_sh": "右肩",
-            "finish_sh": "右肩",
-            "dom": "左手",
-            "aux": "右手",
-            "aux_clock": "9:00",
-            "hit_side": "左侧",
-            "bh_net_sh": "右肩",
-        }
-    return {
-        "front_sh": "左肩",
-        "finish_sh": "左肩",
-        "dom": "右手",
-        "aux": "左手",
-        "aux_clock": "3:00",
-        "hit_side": "右侧",
-        "bh_net_sh": "左肩",
-    }
-
-
-def _card_forehand(w: dict[str, str]) -> str:
-    return f"""【底线正手】
-准备：重心降低，步幅略宽于肩，双手在身前，{w['front_sh']}对准来球（不是{w['aux']}去指球）。
-引拍：身体整体转体拉拍，不要只动手。完成后拍头/掌心偏后下方。口令「拍凳子」：由高往低落到腰，再向前打。错误「擦玻璃」：掌心朝侧面横扫，球打向天花板。
-钟表口令（看不清掌心就不要写钟点）：{w['dom']}大致指向 6:00，{w['aux']}大致指向 {w['aux_clock']}。
-击球：拍子落到腰间再自下而上；击球点胸口高度、身体{w['hit_side']}稍外、身前约 45°。收拍到{w['finish_sh']}。
-随挥：向前上方收，不要垂直上拎；手掌朝外不是朝身体。重上旋时收拍可以更低。
-动力链：腿→腰髋→躯干→肩膀→手臂→球拍。
-必查：①擦玻璃 ②只动手不转体 ③重心不前移 ④{w['aux']}指球而不是{w['front_sh']}对球。
-肘角参考：引拍 130–150°，击球 140–160°，随挥 100–120°。"""
-
-
-def _card_backhand(w: dict[str, str]) -> str:
-    return f"""【底线反手】
-准备：对手击球时立刻转肩（右手选手{w['bh_net_sh']}对网），非持拍手扶拍喉，双脚约肩宽，重心在前脚掌。
-拉拍：非持拍手推拍向后，拍头高于手腕，用转肩带动；双手反拍左肘贴近身体；单反拍面稍关闭。
-击球：身前约髋高，手腕固定、拍面垂直；重心后脚到前脚。双手反拍上侧手发力主导；单反手臂伸直。
-随挥：向前推送到肩以上，但双手反拍收太高易失误；非持拍手接拍颈制动。
-必查：①引拍过晚只能捞球 ②手腕松动掉拍头 ③击球后仰、击球点过高。
-肘角参考：双手引拍 120–140° / 击球 130–150° / 随挥 100–130°；单反各段大约再大 20°。"""
-
-
-def _scope() -> str:
-    return """写给练球的人看。只点评底线正手和底线反手。
-看不清的细节直接跳过，不要在报告里解释评价范围或拍摄规范，也不要点名切削、截击、发球、高压。"""
-
-
-def _observability() -> str:
-    return """【画面能看什么 / 看不准什么】
-能看：屈膝和步幅、转肩还是只动手、击球点相对身体、挥拍先落还是横扫、随挥过肩还是上拎、重心起伏、是否跳起、肘角大致范围。
-很难看准：掌心钟表方向、握拍（大陆式）、拍面精确开合、前臂内旋、甜区。看不清就写「拍头偏后下方 / 拍面朝侧面 / 轨迹横扫」，不要编 6:00。
-slot_drop、body_turn、weight_shift、tech_flags 是 2D 旁证，必须和附图对照；旁证和画面打架时以画面为准。
-背景杂乱时只认骨架和球拍框，不要把旁边的人当球员。"""
-
-
-def prompt_knowledge(clip_ids: list[str], handed: str = "right", player_level: str = "3.0") -> str:
-    w = _side_words(handed if handed in ("left", "right") else "right")
-    wanted = {normalize_kind(i) for i in clip_ids if i}
-    parts: list[str] = [prompt_level_block(player_level), _scope()]
-    if "forehand" in wanted or not wanted:
-        parts.append(_card_forehand(w))
-    if "backhand" in wanted:
-        parts.append(_card_backhand(w))
-    parts.append(_observability())
-    return "\n\n".join(parts)
+    return strengths, problems, []

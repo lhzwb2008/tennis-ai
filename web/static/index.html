@@ -358,7 +358,7 @@
         <p class="hint">支持 mp4 / mov / webm。水平按 NTRP，选最接近自己的一档：2.0 刚能碰到球，3.0 能稳定对拉，5.0 接近竞技。选错等级，建议会不准。请先选正手或反手，系统按你选的来评。样例会分析前 60 秒；平常点「分析样例」会打开上次同等级结果，改算法后点「重新跑样例」，大约要 6 分钟。</p>
         <div class="pillars">
           <div class="pillar"><b>重心</b>越稳越好，尽量保持低重心</div>
-          <div class="pillar"><b>击球点</b>胸口高度、持拍侧稍外、身前约 45°</div>
+          <div class="pillar"><b>击球点</b>胸口附近、持拍一侧稍外、尽量在身前</div>
           <div class="pillar"><b>动力链</b>身体先动、手臂后到，避免伤病</div>
           <div class="pillar"><b>击球效果</b>看拍头速度（画面估算）和旋转轨迹</div>
         </div>
@@ -691,49 +691,6 @@
         <div class="note">绿线为正手，金线为反手</div>`;
     }
 
-    function fmtKmh(v) {
-      if (v == null || v === "") return "";
-      const n = Number(v);
-      if (!Number.isFinite(n)) return "";
-      return n >= 20 ? String(Math.round(n)) : n.toFixed(1);
-    }
-
-    function speedCell(lab, v) {
-      const n = fmtKmh(v);
-      const val = n ? `${n}<span class="unit"> km/h</span>` : "—";
-      return `<div class="speed"><div class="lab">${lab}</div><div class="val">${val}</div></div>`;
-    }
-
-    function speedPanel(speeds, title) {
-      if (!speeds) return "";
-      const keys = ["swing_kmh", "wrist_kmh", "hip_kmh", "ball_in_kmh", "ball_out_kmh"];
-      if (!keys.some((k) => speeds[k] != null)) return "";
-      const swingLab = speeds.swing_from === "wrist" ? "拍头·腕推算" : "拍头";
-      const maxNote = fmtKmh(speeds.swing_kmh_max);
-      return `
-        <h2 style="font-size:16px;margin:0 0 8px">${title || "速度估计"}</h2>
-        <div class="speed-grid">
-          ${speedCell(swingLab, speeds.swing_kmh)}
-          ${speedCell("手腕", speeds.wrist_kmh)}
-          ${speedCell("转髋", speeds.hip_kmh)}
-          ${speedCell("来球", speeds.ball_in_kmh)}
-          ${speedCell("出球", speeds.ball_out_kmh)}
-        </div>
-        <p class="speed-note">按身高或拍长把画面位移换成公里每小时，不是测速雷达。侧面更准，正面会偏慢。${maxNote ? "最快一拍拍头约 " + maxNote + " km/h。" : ""}</p>`;
-    }
-
-    function speedPills(s) {
-      const sp = s.speeds || {};
-      const pills = [];
-      const swing = fmtKmh(sp.swing_kmh);
-      const out = fmtKmh(sp.ball_out_kmh);
-      const hip = fmtKmh(sp.hip_kmh);
-      if (swing) pills.push(`<span class="pill ok">拍头 ${swing} km/h</span>`);
-      if (out) pills.push(`<span class="pill">出球 ${out} km/h</span>`);
-      if (hip) pills.push(`<span class="pill">转髋 ${hip} km/h</span>`);
-      return pills.join("");
-    }
-
     function flagPills(s) {
       const notes = s.flag_notes || [];
       return notes.map((n) => `<span class="pill bad">${esc(n)}</span>`).join("");
@@ -804,7 +761,7 @@
           ? (s.shot_kind === "backhand" ? `<span class="pill">反手</span>` : `<span class="pill">正手</span>`)
           : "";
         return `<article class="swing${issue ? " issue" : ""}">
-          <div class="barline"><span>挥拍 ${s.index} · ${s.contact_t.toFixed(1)} 秒</span>${issuePill}${kind}${seen}${contactPill(s)}${speedPills(s)}${flagPills(s)}</div>
+          <div class="barline"><span>挥拍 ${s.index} · ${s.contact_t.toFixed(1)} 秒</span>${issuePill}${kind}${seen}${contactPill(s)}${flagPills(s)}</div>
           ${media}
           ${hitNotes(s)}
         </article>`;
@@ -828,7 +785,7 @@
           <ul>${a.drills.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
         </div>
         <div class="swings">${swings}</div>
-        <p class="legend">下面每拍是完整挥拍回放。击球定格里：<b>实心十字</b>是相对身体的击球点，<i>虚线圈</i>是理想区（胸口高度、持拍侧稍外、身前约 45°）。不判断球打在拍面哪里。</p>`;
+        <p class="legend">下面每拍是完整挥拍回放。击球定格里：<b>实心十字</b>是相对身体的大致击球位置，<i>虚线圈</i>是理想区（胸口附近、持拍侧稍外、在身前）。不判断球打在拍面哪里。</p>`;
     }
 
     function showReport(data, jobId) {
@@ -888,7 +845,6 @@
           </div>
           <h2 style="font-size:16px;margin:0 0 8px">四维评分</h2>
           <div class="axis-grid">${tiles}</div>
-          ${speedPanel(o.speeds, "速度估计")}
           <div class="scores">
             <div>${radar(sc)}</div>
             <div class="bars">${bars}</div>

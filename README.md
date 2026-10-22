@@ -20,7 +20,7 @@ cp .env.example .env
 
 把侧面样例视频放到 `samples/demo.mp4` 后，可点「分析 1 分钟样例」（只分析前 60 秒）。自己上传的视频按整段分析。能看到球或球拍时，击球画面会按球和拍的距离选取。
 
-2.0 评分四维：重心（稳且低）、击球点（胸口高度、持拍侧稍外、身前约 45°）、动力链（伤病相关核心）、击球效果（拍头速度与旋转轨迹）。击球画面会标出实际击球点（球碰到拍的位置）和理想区。
+2.0 评分四维：重心、击球点、动力链、击球效果。点评由模型看挥拍画面自己写。单机位推出来的角度和速度不写进报告。击球画面会标出相对身体的击球点和理想区。
 
 ## 环境变量
 
@@ -28,7 +28,7 @@ cp .env.example .env
 
 - `CURSOR_API_KEY`
 - `CURSOR_SANDBOX_REPO_URL`
-- `CURSOR_MODEL_ID`（默认 `grok-4.6`）
+- `CURSOR_MODEL_ID`（默认 `grok-4.7`）
 - `CURSOR_MODEL_EFFORT`（默认 `high`；点评任务不需要 xhigh）
 - `CURSOR_REUSE_AGENT`（默认 `1`，复用已启动的点评会话）
 - `CURSOR_AGENT_TIMEOUT_MS`（默认 `180000`）

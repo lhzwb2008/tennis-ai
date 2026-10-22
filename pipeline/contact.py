@@ -10,7 +10,7 @@ import numpy as np
 
 from pipeline.pose import KPT
 
-# Poppy：理想击球点 ≈ 胸口高度、持拍侧稍外、身前约 45°
+# 理想击球点：胸口附近、持拍侧稍外、在身前。45° 只是内部几何，不写进报告。
 _IDEAL_HEIGHT = 0.02  # 相对胸口：0 为胸口，正值更高（画面上方）
 _IDEAL_SIDE = 0.32  # 持拍侧、稍离开身体
 _IDEAL_FORWARD = 0.28  # 身前；与侧向接近时大约 45°
@@ -214,7 +214,7 @@ def _forward_label(f: float | None) -> str:
     if f is None:
         return "前后看不清"
     if 0.10 <= f <= 0.42:
-        return "身前约45°"
+        return "在身前"
     if 0.42 < f <= 0.60:
         return "偏前"
     if 0.04 <= f < 0.10:

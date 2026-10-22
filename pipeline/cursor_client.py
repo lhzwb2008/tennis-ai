@@ -49,8 +49,8 @@ def base_url() -> str:
 
 
 def model_id() -> str:
-    # Cloud Agents 以 GET /v1/models 为准；Grok 4.6 Extra High 的 id 是 grok-4.6
-    return _env("CURSOR_MODEL_ID", "grok-4.6")
+    # Cloud Agents 以 GET /v1/models 为准。
+    return _env("CURSOR_MODEL_ID", "grok-4.7")
 
 
 def model_params() -> list[dict[str, str]]:
